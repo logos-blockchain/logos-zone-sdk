@@ -1,7 +1,7 @@
 use cucumber::gherkin::Step;
 use tracing::warn;
 
-use super::support::ZoneTestError;
+use super::ZoneTestError;
 use crate::cucumber::{error::StepError, steps::TARGET};
 
 pub(super) fn zone_step_error(step: &Step, error: &ZoneTestError) -> StepError {

@@ -5,7 +5,7 @@ use std::{
 
 use lb_core::mantle::ops::channel::inscribe::Inscription;
 
-use super::support::{
+use super::{
     DiscardedPayloads, ZoneTestError, replay_finalized_history, replayed_inscription_payloads,
 };
 use crate::cucumber::{
