@@ -1,5 +1,5 @@
 [workspace]
-members  = ["logos_sql", "tests/logos-sql", "tests/zone-sdk", "zone-sdk"]
+members  = ["logos_sql", "tests/logos-sql", "tests/zone-sdk", "zone-sdk", "zone-sdk/testing"]
 resolver = "2"
 
 [workspace.package]
@@ -37,6 +37,7 @@ logos-blockchain-tests           = { default-features = false, git = "https://gi
 logos-blockchain-zone-tests      = { default-features = false, path = "tests/zone-sdk" }
 logos-sql                        = { default-features = false, path = "logos_sql" }
 num-bigint                       = { default-features = false, version = "0.4" }
+proptest                         = { default-features = false, version = "1.0" }
 rand                             = { default-features = false, version = "0.8" }
 reqwest                          = { default-features = false, version = "0.12" }
 rpds                             = { default-features = false, version = "1" }
@@ -50,6 +51,7 @@ thiserror                        = { default-features = false, version = "2.0" }
 time                             = { default-features = false, version = "0.3" }
 tokio                            = { default-features = false, version = "1" }
 tracing                          = { default-features = false, version = "0.1" }
+tracing-subscriber               = { default-features = false, version = "0.3" }
 zeroize                          = { default-features = false, version = "1" }
 
 [profile.release]

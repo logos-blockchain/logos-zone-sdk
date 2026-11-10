@@ -1,0 +1,18 @@
+[profile.default]
+
+# Keep CPU-bound simulation tests from starving the rest of the suite.
+[test-groups]
+zone-sdk-sim = { max-threads = 3 }
+
+[[profile.default.overrides]]
+filter     = "package(logos-blockchain-zone-sdk-testing)"
+test-group = "zone-sdk-sim"
+
+# Property schedules can take several minutes on the macOS runner.
+[[profile.default.overrides]]
+filter       = "package(logos-blockchain-zone-sdk-testing) and binary(properties)"
+slow-timeout = { period = "3m", terminate-after = 5 }
+
+[[profile.default.overrides]]
+filter       = "all()"
+slow-timeout = { period = "30s", terminate-after = 4 }

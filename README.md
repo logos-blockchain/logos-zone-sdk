@@ -7,6 +7,7 @@ This workspace contains:
 - `zone-sdk`: `logos-blockchain-zone-sdk`, for zone sequencers and readers.
 - `logos_sql`: `logos-sql`, SQLite replication built on the SDK.
 - `tests/zone-sdk` and `tests/logos-sql`: their Cucumber suites.
+- [`zone-sdk/testing`](zone-sdk/testing/README.md): simulated-node scenarios and property tests.
 
 ## Development
 
