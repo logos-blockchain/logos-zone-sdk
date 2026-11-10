@@ -1,0 +1,9 @@
+[toolchain]
+# Keep this in sync with `rust-toolchain.toml` in the node repository at the node revision pinned in `Cargo.toml`.
+# When bumping it, also update the nightly toolchain used for formatting in the following places:
+# * .github/workflows/code-check.yml (formatting job)
+# * .pre-commit-config.yaml (fmt hook)
+# * README.md (formatting command)
+channel = "1.99.0"
+# Even if clippy should be included in the default profile, in some cases it is not installed. So we force it with an explicit declaration.
+components = ["clippy"]

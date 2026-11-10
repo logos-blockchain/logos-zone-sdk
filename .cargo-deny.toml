@@ -1,0 +1,75 @@
+# Config file reference can be found at https://embarkstudios.github.io/cargo-deny/checks/cfg.html.
+
+[graph]
+all-features = true
+exclude-dev  = false
+
+[advisories]
+# When adding a new line, please consider to which group the advisory belongs, and whether the issue can be fixed by upgrading some dependencies.
+ignore = [
+  # Unmaintained deps. To review periodically to check if they can be removed with an upgrade.
+  { id = "RUSTSEC-2024-0388", reason = "`derivative` is unmaintained. No workspace crate depends on it directly. Pulled in via `ark-groth16` -> `ark-crypto-primitives`, which requires it non-optionally in both 0.5 and 0.6, so no arkworks upgrade can drop it. Re-evaluate this entry on future arkworks releases." },
+  { id = "RUSTSEC-2024-0436", reason = "`paste` is unmaintained. No workspace crate depends on it directly. Pulled in via `ark-ff` 0.5 (removed in 0.6, which needs jellyfish/`jf-poseidon2` on arkworks 0.6 first) and via `netlink-packet-core` 0.8 behind libp2p's `if-watch` (removed in 0.9, but `if-watch` 3.2.2 still requires ^0.8.1). Re-evaluate this entry in the future and drop it once/if both are gone." },
+  # Vulnerable deps, affecting our production code. To review periodically to check if they can be removed with an upgrade.
+  { id = "RUSTSEC-2026-0119", reason = "`hickory-proto` O(n^2) name compression during DNS message *encoding* (no feature gate, so the code is present). We use it only as a stub resolver behind `libp2p` `.with_dns()`, encoding small outbound queries rather than many-record responses, so exposure is low. Fixed in `hickory-proto` 0.26.1+, but `libp2p-dns` 0.44.0 (latest) still requires `hickory-resolver` ^0.25.2, so the upgrade is blocked upstream." },
+  # Unmaintained deps. Acknowledged but a replacement has not been decided yet.
+  { id = "RUSTSEC-2024-0449", reason = "`unsafe-libyaml` is unmaintained. Pulled in via deprecated `serde_yaml` 0.9, used by workspace crates and by `kube-client` and `cfgsync-core`, so migrating the workspace alone won't drop it." },
+  { id = "RUSTSEC-2025-0141", reason = "`bincode` is unmaintained but continuing to use it." },
+
+  # Vulnerable deps, not affecting our production code.
+  { id = "RUSTSEC-2026-0118", reason = "`hickory-proto` unbounded NSEC3 closest-encloser loop. NOT APPLICABLE to our build: the advisory requires the `dnssec-ring` or `dnssec-aws-lc-rs` feature, and the only features we enable on `hickory-proto` 0.25.2 are `std`, `tokio` and `futures-io`, so the vulnerable validator is not compiled in. Kept only because cargo-deny matches on crate version, not enabled features. Reached solely via `libp2p` -> `libp2p-dns` -> `hickory-resolver`." },
+]
+unmaintained = "all"
+unsound = "all"
+unused-ignored-advisory = "deny"
+yanked = "deny"
+
+[bans]
+allow-wildcard-paths = false
+multiple-versions    = "allow"
+
+[bans.std-replacements]
+level = "deny"
+scope = "workspace"
+
+[bans.workspace-dependencies]
+duplicates = "deny"
+unused     = "deny"
+
+[licenses]
+allow = [
+  "Apache-2.0 WITH LLVM-exception",
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "BlueOak-1.0.0",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "MIT",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "Zlib",
+]
+private = { ignore = false }
+unused-allowed-license = "deny"
+unused-license-exception = "deny"
+
+[sources]
+allow-git = [
+  "https://github.com/EspressoSystems/jellyfish.git",
+  "https://github.com/arkworks-rs/spongefish.git",
+  "https://github.com/logos-blockchain/logos-blockchain-circuits.git",
+  "https://github.com/logos-blockchain/logos-blockchain-rust-rapidsnark.git",
+  "https://github.com/logos-blockchain/logos-blockchain-testing.git",
+  "https://github.com/logos-blockchain/logos-blockchain.git",
+]
+required-git-spec = "tag"
+unknown-git = "deny"
+unknown-registry = "deny"
+unused-allowed-org = "deny"
+unused-allowed-source = "deny"
+
+[sources.allow-org]
+github = ["logos-co"]

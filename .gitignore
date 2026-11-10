@@ -1,0 +1,8 @@
+/target/
+**/cucumber_tests/temp/
+**/.e2e_artefacts/
+**/*.proptest-regressions
+**/*.log
+**/*.log.[0-9]*
+.idea/
+.vscode/

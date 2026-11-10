@@ -1,0 +1,141 @@
+# The node repository runs its Cucumber suites only in the merge queue, on the
+# self-hosted runners, after review; pull requests only carry a lightweight
+# required check there. This repository has no branch protection yet, so the
+# lane runs in the merge queue and on demand, and the stable result check is
+# left out until the queue is configured.
+on:
+  merge_group:
+    types: [ checks_requested ]
+  workflow_dispatch:
+
+name: Cucumber integration tests
+
+permissions:
+  contents: read
+
+# Ensure only one workflow run per branch/workflow is active at a time.
+# Cancels any in-progress runs for the same group to avoid overlap.
+concurrency:
+  group: ${{ github.workflow }}@${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Run cucumber integration tests (${{ matrix.platform.label }})
+
+    strategy:
+      # A failed OS must not cancel the other OS.
+      fail-fast: false
+      matrix:
+        platform:
+          # Using self-hosted runners because we were running out of memory on GitHub-hosted runners
+          - os: [ self-hosted, Linux ]
+            label: self-hosted-linux
+          - os: [ self-hosted, macOS ]
+            label: self-hosted-macos
+    runs-on: ${{ matrix.platform.os }}
+    env:
+      # The suites start real node processes. The node harness is a Git
+      # dependency here, so it cannot build the node from this workspace: the
+      # binary is built from the pinned node revision below and handed over
+      # explicitly, as the node repository's lane does with its own build.
+      LOGOS_BLOCKCHAIN_NODE_BIN: ${{ github.workspace }}/target/node/bin/logos-blockchain-node
+      PASSWORD_MANAGER_BIN: ${{ github.workspace }}/target/debug/examples/password_manager
+
+    steps:
+      # Remove any rustup override to ensure default toolchain is used
+      - name: Disable rustup override
+        run: rustup override unset || true
+
+      - name: Expose gmp to cargo (macOS runners)
+        if: runner.os == 'macOS'
+        run: |
+          echo "MACOSX_DEPLOYMENT_TARGET=15.0" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=-C linker=rust-lld -L /run/current-system/sw/lib" >> "$GITHUB_ENV"
+          echo "LIBRARY_PATH=/run/current-system/sw/lib" >> "$GITHUB_ENV"
+
+      # `github.sha` is the merge queue's temporary commit, i.e. the exact state
+      # that becomes `main` if this run passes.
+      - name: Checkout repository
+        uses: actions/checkout@85e6279cec87321a52edac9c87bce653a07cf6c2  # Version 4.2.2
+        with:
+          ref: ${{ github.sha }}
+
+      # Prune before any builds.
+      - name: Prune disk space (cache-aware, self-hosted)
+        uses: ./.github/actions/prune-disk-space
+
+      # Every node crate in `Cargo.toml` is pinned to one revision; the node
+      # binary must come from the same one.
+      - name: Read the pinned node revision
+        id: node
+        run: |
+          rev="$(sed -nE 's/^lb-core += \{.*rev = "([0-9a-f]{40})".*$/\1/p' Cargo.toml)"
+          if [ -z "$rev" ]; then
+            echo "could not read the pinned node revision from Cargo.toml" >&2
+            exit 1
+          fi
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+
+      # `--features testing` matches the node harness's own node build.
+      # `--target-dir` keeps the node build cached between runs on the
+      # self-hosted runners; `--force` rebuilds even when the same revision is
+      # already installed there.
+      - name: Build the node binary at the pinned revision
+        env:
+          CARGO_INCREMENTAL: 0  # Disable incremental compilation
+        run: >-
+          cargo install --locked --force
+          --git https://github.com/logos-blockchain/logos-blockchain.git
+          --rev "${{ steps.node.outputs.rev }}"
+          --features testing
+          --target-dir target/node-target
+          --root target/node
+          logos-blockchain-node
+
+      - name: Build the password manager example
+        run: cargo build --locked -p logos-sql --example password_manager
+
+      # Special exclusion tags, as in the node repository (we want to run the rest of the tests and not fail the workflow):
+      # - @broken = tests that are broken and must still be fixed
+      # - @undefined_behaviour = tests that trigger undefined system-level behaviour in the logos-blockchain-node binary
+
+      # Feature: Zone SDK (@zone_ci)
+      - name: Run cucumber suite - zone
+        timeout-minutes: 60
+        uses: ./.github/actions/run-cucumber-suite
+        with:
+          suite_tag: "@zone_ci"
+          package: logos-blockchain-zone-tests
+          suite_name: zone
+          artifacts_dir: tests/clients/zone-sdk/cucumber_tests/temp
+          artifact_subdir: "Zone SDK"
+          max_concurrent_scenarios: "1"
+
+      # Feature: Logos SQL (@logos_sql_ci)
+      - name: Run cucumber suite - Logos SQL
+        timeout-minutes: 60
+        uses: ./.github/actions/run-cucumber-suite
+        with:
+          suite_tag: "@logos_sql_ci"
+          package: logos-blockchain-sql-tests
+          suite_name: logos-sql
+          artifacts_dir: tests/clients/logos-sql/cucumber_tests/temp
+          artifact_subdir: "Logos SQL"
+          max_concurrent_scenarios: "1"
+
+      # Feature: Password manager (@password_manager), driving the example executable built above
+      - name: Run cucumber suite - password manager
+        timeout-minutes: 30
+        uses: ./.github/actions/run-cucumber-suite
+        with:
+          suite_tag: "@password_manager"
+          package: logos-blockchain-sql-tests
+          suite_name: password-manager
+          artifacts_dir: tests/clients/logos-sql/cucumber_tests/temp
+          artifact_subdir: "Password manager"
+          max_concurrent_scenarios: "1"
+
+      - name: Clean up cucumber artifacts
+        if: success() || failure()
+        run: rm -rf "${{ github.workspace }}/tests/clients/zone-sdk/cucumber_tests/temp/cucumber_artefacts" "${{ github.workspace }}/tests/clients/logos-sql/cucumber_tests/temp/cucumber_artefacts"
