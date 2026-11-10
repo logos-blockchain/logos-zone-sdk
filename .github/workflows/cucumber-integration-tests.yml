@@ -108,7 +108,7 @@ jobs:
           suite_tag: "@zone_ci"
           package: logos-blockchain-zone-tests
           suite_name: zone
-          artifacts_dir: tests/clients/zone-sdk/cucumber_tests/temp
+          artifacts_dir: tests/zone-sdk/cucumber_tests/temp
           artifact_subdir: "Zone SDK"
           max_concurrent_scenarios: "1"
 
@@ -120,7 +120,7 @@ jobs:
           suite_tag: "@logos_sql_ci"
           package: logos-blockchain-sql-tests
           suite_name: logos-sql
-          artifacts_dir: tests/clients/logos-sql/cucumber_tests/temp
+          artifacts_dir: tests/logos-sql/cucumber_tests/temp
           artifact_subdir: "Logos SQL"
           max_concurrent_scenarios: "1"
 
@@ -132,10 +132,10 @@ jobs:
           suite_tag: "@password_manager"
           package: logos-blockchain-sql-tests
           suite_name: password-manager
-          artifacts_dir: tests/clients/logos-sql/cucumber_tests/temp
+          artifacts_dir: tests/logos-sql/cucumber_tests/temp
           artifact_subdir: "Password manager"
           max_concurrent_scenarios: "1"
 
       - name: Clean up cucumber artifacts
         if: success() || failure()
-        run: rm -rf "${{ github.workspace }}/tests/clients/zone-sdk/cucumber_tests/temp/cucumber_artefacts" "${{ github.workspace }}/tests/clients/logos-sql/cucumber_tests/temp/cucumber_artefacts"
+        run: rm -rf "${{ github.workspace }}/tests/zone-sdk/cucumber_tests/temp/cucumber_artefacts" "${{ github.workspace }}/tests/logos-sql/cucumber_tests/temp/cucumber_artefacts"

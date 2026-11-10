@@ -147,7 +147,7 @@ fn start_password_manager(
     let binary = env::var_os("PASSWORD_MANAGER_BIN").map_or_else(
         || {
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../../target/debug/examples/password_manager")
+                .join("../../target/debug/examples/password_manager")
         },
         PathBuf::from,
     );
