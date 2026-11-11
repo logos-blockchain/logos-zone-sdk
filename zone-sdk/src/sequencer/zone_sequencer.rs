@@ -40,7 +40,7 @@ use super::{
     client::SequencerClient,
     handle::SequencerHandle,
     slot_clock::SlotClock,
-    state::{ParentTaken, TxState},
+    state::{ParentTaken, SubmitRefused, TxState},
     tx_builder::{
         assemble_atomic_bundle_tx, assemble_channel_config_tx, build_and_fund_config,
         create_channel_config_tx, create_inscribe_tx, find_own_key_index, fund_ops,
@@ -1838,7 +1838,7 @@ pub(super) fn track_pending_tx(
     state: &mut TxState,
     tx: SignedOps<Unverified, StandardMode>,
     channel_id: ChannelId,
-) -> Result<Option<MsgId>, ParentTaken> {
+) -> Result<Option<MsgId>, SubmitRefused> {
     let tx: SharedTx = tx.into();
     match classify_channel_tx(&tx, channel_id, &mut None).map(|classified| classified.kind) {
         Some(ChannelTxKind::Inscription(i)) => {

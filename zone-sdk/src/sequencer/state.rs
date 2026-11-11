@@ -159,6 +159,58 @@ impl From<ParentTaken> for Error {
     }
 }
 
+/// A local submission whose parents lead back, through pending entries, to a
+/// message it carries: nothing in the loop can be mined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParentCycle {
+    /// The pending tx chained on a message of the submission.
+    pub through: TxHash,
+}
+
+impl std::fmt::Display for ParentCycle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "pending {} chains on this tx, which chains back on it",
+            hex::encode(self.through.0)
+        )
+    }
+}
+
+/// Why a local submission is not tracked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubmitRefused {
+    ParentTaken(ParentTaken),
+    ParentCycle(ParentCycle),
+}
+
+impl std::fmt::Display for SubmitRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ParentTaken(taken) => taken.fmt(f),
+            Self::ParentCycle(cycle) => cycle.fmt(f),
+        }
+    }
+}
+
+impl From<ParentTaken> for SubmitRefused {
+    fn from(taken: ParentTaken) -> Self {
+        Self::ParentTaken(taken)
+    }
+}
+
+impl From<ParentCycle> for SubmitRefused {
+    fn from(cycle: ParentCycle) -> Self {
+        Self::ParentCycle(cycle)
+    }
+}
+
+impl From<SubmitRefused> for Error {
+    fn from(refused: SubmitRefused) -> Self {
+        Self::ChannelStateChanged(refused.to_string())
+    }
+}
+
 /// The bundle nature of a pending inscription. Lets us surface the right
 /// [`PendingTx`] variant on finalize/adopt and re-prepare on orphan.
 #[derive(Debug, Clone)]
@@ -849,7 +901,24 @@ impl TxState {
             .filter(|tx_hash| !waiting.contains_key(tx_hash))
             .copied()
             .collect();
-        while let Some(at) = (0..ready.len()).min_by_key(|&at| ready[at].0) {
+        loop {
+            if ready.is_empty() {
+                // Entries waiting on each other: break the loop at its lowest
+                // hash, the rest follows in dependency order.
+                let Some(tx_hash) = waiting
+                    .keys()
+                    .filter(|&&tx_hash| self.ancestors(self.parents_of(tx_hash)).contains(&tx_hash))
+                    .min_by_key(|tx_hash| tx_hash.0)
+                    .copied()
+                else {
+                    break;
+                };
+                waiting.remove(&tx_hash);
+                ready.push(tx_hash);
+            }
+            let at = (0..ready.len())
+                .min_by_key(|&at| ready[at].0)
+                .expect("ready is not empty");
             let tx_hash = ready.swap_remove(at);
             if let Some(entry) = self.pending_tx_of(&tx_hash) {
                 self.displaced.push(Displaced::Own(Box::new(entry)));
@@ -858,13 +927,30 @@ impl TxState {
                 self.displaced.push(Displaced::Other(signed_tx));
             }
             for child in children.remove(&tx_hash).unwrap_or_default() {
-                let left = waiting.get_mut(&child).expect("counted above");
-                *left -= 1;
-                if *left == 0 {
-                    ready.push(child);
+                // A child forced out of a loop has left `waiting`.
+                if let Some(left) = waiting.get_mut(&child) {
+                    *left -= 1;
+                    if *left == 0 {
+                        waiting.remove(&child);
+                        ready.push(child);
+                    }
                 }
             }
         }
+    }
+
+    /// The pending txs that `parents` lead back through.
+    fn ancestors(&self, parents: impl IntoIterator<Item = MsgId>) -> HashSet<TxHash> {
+        let producers = self.producers();
+        let produced_by = |parent: MsgId| producers.get(&parent).copied();
+        let mut seen: HashSet<TxHash> = HashSet::new();
+        let mut stack: Vec<TxHash> = parents.into_iter().filter_map(produced_by).collect();
+        while let Some(tx_hash) = stack.pop() {
+            if seen.insert(tx_hash) {
+                stack.extend(self.parents_of(tx_hash).filter_map(produced_by));
+            }
+        }
+        seen
     }
 
     /// The reportable form of a pending inscription or bundle.
@@ -925,7 +1011,7 @@ impl TxState {
         &mut self,
         signed_tx: impl Into<SharedTx>,
         channel_id: ChannelId,
-    ) -> Result<Option<MsgId>, ParentTaken> {
+    ) -> Result<Option<MsgId>, SubmitRefused> {
         let signed_tx: SharedTx = signed_tx.into();
         let tx_hash = signed_tx.hash();
         let lineage = opaque_lineage(&signed_tx, channel_id);
@@ -933,15 +1019,36 @@ impl TxState {
             && let Some(by) = self.pending_child(parent)
             && by != tx_hash
         {
-            return Err(ParentTaken { parent, by });
+            return Err(ParentTaken { parent, by }.into());
         }
         if let Some(parent) = lineage.config_parent
             && let Some(by) = self.pending_config_child(parent)
             && by != tx_hash
         {
-            return Err(ParentTaken { parent, by });
+            return Err(ParentTaken { parent, by }.into());
+        }
+        if let Some(through) = self.closing_loop_with(&lineage) {
+            return Err(ParentCycle { through }.into());
         }
         Ok(self.insert_other(signed_tx, channel_id, lineage))
+    }
+
+    /// The pending tx that would close a loop with the submission, if any:
+    /// one chained on a tip it leaves that its own parents lead back to.
+    fn closing_loop_with(&self, lineage: &OpaqueLineage) -> Option<TxHash> {
+        let parents = lineage
+            .first_parent
+            .into_iter()
+            .chain(lineage.config_parent);
+        let ancestors = self.ancestors(parents);
+        let on_msg = lineage.last_msg.and_then(|tip| self.pending_child(tip));
+        let on_config = lineage
+            .last_config
+            .and_then(|tip| self.pending_config_child(tip));
+        on_msg
+            .into_iter()
+            .chain(on_config)
+            .find(|child| ancestors.contains(child))
     }
 
     /// Track an opaque tx observed on the canonical channel, the counterpart
@@ -2071,6 +2178,67 @@ mod tests {
         assert!(!state.is_tracked(&child_hash));
     }
 
+    /// Two pending txs chained on each other, A on B's message and B's config
+    /// on A's config, can only come in mirrored, and neither can land. The
+    /// walk breaks the loop at the lower hash and keeps a child after its
+    /// parent.
+    #[test]
+    fn displace_breaks_a_dependency_cycle() {
+        let channel_id = ChannelId::from([0u8; 32]);
+        let mut state = TxState::new(header_id(0), MsgId::root());
+        let (_, _, a_config) = bundle_tx_on(MsgId::root(), MsgId::root(), 1);
+        let (b, b_msg, _) = bundle_tx_on(MsgId::root(), a_config, 2);
+        let (a, a_msg, config) = bundle_tx_on(b_msg, MsgId::root(), 1);
+        assert_eq!(
+            config, a_config,
+            "a config id is independent of the inscription beside it"
+        );
+        let (a_hash, b_hash) = (a.hash(), b.hash());
+        state.observe_other_tx(b, channel_id);
+        state.observe_other_tx(a, channel_id);
+        let (child, _) = submit_own(&mut state, a_msg, 3);
+
+        state.displace([a_hash]);
+        let shed: Vec<TxHash> = std::mem::take(&mut state.displaced)
+            .iter()
+            .map(Displaced::tx_hash)
+            .collect();
+
+        let first = if a_hash.0 < b_hash.0 { a_hash } else { b_hash };
+        assert_eq!(
+            shed.len(),
+            3,
+            "the pair and the child are all shed: {shed:?}"
+        );
+        assert_eq!(shed[0], first, "the loop is broken at the lower hash");
+        let at = |hash: TxHash| shed.iter().position(|h| *h == hash).expect("shed");
+        assert!(at(child) > at(a_hash), "the child goes after its parent");
+        assert!(
+            !state.is_tracked(&a_hash) && !state.is_tracked(&b_hash) && !state.is_tracked(&child)
+        );
+    }
+
+    /// A submission whose parent leads back, through pending entries, to a
+    /// message it carries is refused: the loop could never be mined.
+    #[test]
+    fn submit_other_refuses_a_tx_closing_a_cycle() {
+        let channel_id = ChannelId::from([0u8; 32]);
+        let mut state = TxState::new(header_id(0), MsgId::root());
+        let (_, _, a_config) = bundle_tx_on(MsgId::root(), MsgId::root(), 1);
+        let (b, b_msg, _) = bundle_tx_on(MsgId::root(), a_config, 2);
+        let b_hash = b.hash();
+        state.submit_other(b, channel_id).unwrap();
+
+        let (a, _, _) = bundle_tx_on(b_msg, MsgId::root(), 1);
+        let a_hash = a.hash();
+        assert_eq!(
+            state.submit_other(a, channel_id),
+            Err(ParentCycle { through: b_hash }.into())
+        );
+        assert!(!state.is_tracked(&a_hash));
+        assert!(state.is_tracked(&b_hash));
+    }
+
     /// One shed pass orders across its rules: an entry shed for age comes
     /// before the entry chained on it that is shed as a stale config.
     #[test]
@@ -2346,7 +2514,8 @@ mod tests {
             Err(ParentTaken {
                 parent: MsgId::root(),
                 by: first_hash
-            })
+            }
+            .into())
         );
         assert_eq!(state.publish_parent(tip), msg_id(10));
     }
@@ -2755,7 +2924,8 @@ mod tests {
             Err(ParentTaken {
                 parent: MsgId::root(),
                 by: first_hash,
-            })
+            }
+            .into())
         );
         assert_eq!(state.pending_config_child(MsgId::root()), Some(first_hash));
 

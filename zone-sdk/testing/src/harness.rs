@@ -368,7 +368,7 @@ impl Harness {
                     progressed = true;
                     log_event(&seq.name, &seq.node, &event);
                     seq.checker.observe(&event);
-                    seq.mirror.observe(&event);
+                    seq.mirror.observe(&event, channel_id);
                     seq.oracles
                         .observe(&event, &seq.node, channel_id, &seq.name);
                     seq.policy.on_event(sequencer, &event).await;

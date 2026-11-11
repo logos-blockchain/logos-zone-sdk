@@ -260,12 +260,12 @@ test only asserts on the result.
 | `notes.rs` | 10 | deposits, withdraws, pins, refunds, the wallet view |
 | `bundles.rs` | 6 | multi-sig rounds, the prepare-then-submit boundary, hand-built custom txs |
 | `configs.rs` | 4 | re-keying, orphaning by config, posting timeouts |
-| `known_issues.rs` | 6 | shed and liveness mechanisms distilled from property-ladder findings, each with the fewest moves that reach it |
+| `regressions.rs` | 7 | stories written for SDK bugs found by the ladder or in review, each with the fewest moves that reach it; red until the fix lands |
 | `tiers.rs` | 1 + pairs | the catalogue's self-check (`s00_chain_does_what_it_says`) and the four pairs stories |
 | `tests/gas.rs` | | the fee model: paid equals priced, unfunded txs are evicted, price rises are paid |
 
 In numbers: 33 stories × 25 chains, plus 484 pairs × 4 stories, plus the
-known-issue and gas tests, about 2 780 tests in one
+regression and gas tests, about 2 780 tests in one
 `cargo test -p logos-blockchain-zone-sdk-testing`.
 
 A story is written against the `World` helpers (`publish`, `deposit`,
@@ -305,9 +305,12 @@ hash.
 **The mirror** (`src/mirror.rs`) is a consumer written the way LEZ consumes
 the SDK: it rebuilds the channel view from `ChannelUpdate`s alone, appending
 on an extension and rebuilding on a conflict, and is compared with the
-node's canonical chain after every settle. A restart without a checkpoint
-starts the mirror over, as a zone starting from nothing would. If the
-updates are not enough to rebuild the view, this is what fails.
+node's canonical chain after every settle. Each orphan must come back in
+the kind the entry was adopted as, or the shape of the pending tx it was:
+a consumer republishes a custom tx or a config from the entry it is handed.
+A restart without a checkpoint starts the mirror over, as a zone starting
+from nothing would. If the updates are not enough to rebuild the view, this
+is what fails.
 
 **The oracles** (`src/oracles.rs`) check, once a sequencer has caught up
 with its node (connected, told about the tip, agreeing on LIB):
@@ -469,7 +472,7 @@ test. The workflow is:
 
 1. Read the shrunk schedule and the trace, find the mechanism: which pending
    entry, which shed, which block without a channel update.
-2. Write a hand story in `tests/scenarios/known_issues.rs` that reproduces it
+2. Write a hand story in `tests/scenarios/regressions.rs` that reproduces it
    with the fewest moves and names the mechanism in its doc comment. It runs
    on every chain shape like any other story. If the mechanism cannot be
    named yet, keep the shrunk schedule itself as a `#[test]` replay, event by

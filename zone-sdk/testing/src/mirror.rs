@@ -6,7 +6,7 @@
 //! a conflict, drop finalized entries. After every settle it is compared with
 //! what the node's canonical chain really holds for the channel.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use lb_core::{
     header::HeaderId,
@@ -34,7 +34,8 @@ pub struct Mirror {
     /// LIB of the last processed event; the mirror is only compared with the
     /// node once both agree on it.
     lib: Option<HeaderId>,
-    pending: HashSet<TxHash>,
+    /// The pending txs of the last processed checkpoint, by hash.
+    pending: HashMap<TxHash, SignedOps<Unverified, StandardMode>>,
     /// The message and config ids the pending txs carry.
     pending_msgs: HashSet<MsgId>,
     violations: Violations,
@@ -54,7 +55,6 @@ fn lineage(tx: &SignedOps<Unverified, StandardMode>, channel: ChannelId) -> Opti
     config.then_some(false)
 }
 
-/// The lineage a view entry belongs to, as [`lineage`] classifies it.
 /// The entry kind a mined tx must be reported as, from the shapes the SDK's
 /// own API produces: `publish` is one inscription, paid for by at most one
 /// plain transfer; `publish_atomic_withdraw` adds a channel transfer and
@@ -95,6 +95,7 @@ const fn entry_shape(entry: &ChannelUpdateTx) -> &'static str {
     }
 }
 
+/// The lineage a view entry belongs to, as [`lineage`] classifies it.
 fn entry_lineage(entry: &ChannelUpdateTx, channel: ChannelId) -> Option<bool> {
     match entry {
         ChannelUpdateTx::Config(tx) | ChannelUpdateTx::Custom(tx) => lineage(tx, channel),
@@ -157,7 +158,7 @@ impl Mirror {
         self.pending_msgs.clear();
     }
 
-    pub fn observe(&mut self, event: &Event) {
+    pub fn observe(&mut self, event: &Event, channel: ChannelId) {
         let Event::BlocksProcessed {
             checkpoint,
             channel_update,
@@ -177,7 +178,8 @@ impl Mirror {
                     }
                 }
             }
-            ChannelUpdate::Conflict { .. } => {
+            ChannelUpdate::Conflict { orphaned, .. } => {
+                self.check_orphans(orphaned, channel);
                 self.chain = channel_update
                     .canonical_chain()
                     .expect("conflict carries the view")
@@ -188,12 +190,29 @@ impl Mirror {
         let finalized: HashSet<TxHash> = finalized.iter().map(|tx| tx.tx_hash).collect();
         self.chain.retain(|tx| !finalized.contains(&tx.tx_hash()));
         self.lib = Some(checkpoint.lib);
-        self.pending = checkpoint.pending_txs.iter().map(|(h, _)| *h).collect();
-        self.pending_msgs = checkpoint
-            .pending_txs
-            .iter()
-            .flat_map(|(_, tx)| msg_ids(tx))
-            .collect();
+        self.pending = checkpoint.pending_txs.iter().cloned().collect();
+        self.pending_msgs = self.pending.values().flat_map(msg_ids).collect();
+    }
+
+    /// An orphan is reported in the kind the entry had: the one it was
+    /// adopted as, or the shape of the pending tx it was.
+    fn check_orphans(&mut self, orphaned: &[ChannelUpdateTx], channel: ChannelId) {
+        for entry in orphaned {
+            let hash = entry.tx_hash();
+            let was = if let Some(held) = self.chain.iter().find(|held| held.tx_hash() == hash) {
+                entry_shape(held)
+            } else if let Some(tx) = self.pending.get(&hash) {
+                shape(tx, channel)
+            } else {
+                continue;
+            };
+            let reported = entry_shape(entry);
+            if reported != was {
+                self.record(format!(
+                    "orphan {hash:?} reported as {reported}, but the entry was {was}"
+                ));
+            }
+        }
     }
 
     /// Compare the mirrored view with `node`'s canonical chain for `channel`.
@@ -222,7 +241,7 @@ impl Mirror {
         let held_set: HashSet<TxHash> = held.iter().map(|(h, _)| *h).collect();
 
         for (hash, _) in &truth {
-            if !held_set.contains(hash) && !self.pending.contains(hash) {
+            if !held_set.contains(hash) && !self.pending.contains_key(hash) {
                 self.record(format!(
                     "{name}: canonical tx {hash:?} is neither in the mirrored view nor pending"
                 ));
@@ -269,7 +288,7 @@ impl Mirror {
             .into_iter()
             .chain(hashes(node.mempool().iter()))
             .chain(node.rejected().into_iter().map(|r| r.tx_hash))
-            .chain(self.pending.iter().copied())
+            .chain(self.pending.keys().copied())
             .collect();
         let known_msgs: HashSet<MsgId> = node
             .canonical_txs()

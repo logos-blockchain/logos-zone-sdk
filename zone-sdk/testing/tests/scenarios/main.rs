@@ -94,9 +94,9 @@ macro_rules! pairs {
 
 mod bundles;
 mod configs;
-mod known_issues;
 mod notes;
 mod publishing;
+mod regressions;
 mod tiers;
 
 fn keys(names: &[&str]) -> VerifiedChannelKeys {
@@ -429,8 +429,8 @@ fn funding_stamp(
         .map(|record| u64::from(record.funded_at))
 }
 
-/// Every tx sequencer `index` has reported orphaned so far.
-fn orphaned_hashes(world: &World, index: usize) -> HashSet<lb_zone_sdk::node_types::TxHash> {
+/// Every entry sequencer `index` has reported orphaned so far, in order.
+fn orphaned_entries(world: &World, index: usize) -> Vec<lb_zone_sdk::sequencer::ChannelUpdateTx> {
     world.harness.seqs[index]
         .events
         .iter()
@@ -440,7 +440,14 @@ fn orphaned_hashes(world: &World, index: usize) -> HashSet<lb_zone_sdk::node_typ
             }
             _ => None,
         })
-        .flat_map(|update| update.orphaned().iter())
+        .flat_map(|update| update.orphaned().iter().cloned())
+        .collect()
+}
+
+/// Every tx sequencer `index` has reported orphaned so far.
+fn orphaned_hashes(world: &World, index: usize) -> HashSet<lb_zone_sdk::node_types::TxHash> {
+    orphaned_entries(world, index)
+        .iter()
         .map(lb_zone_sdk::sequencer::ChannelUpdateTx::tx_hash)
         .collect()
 }

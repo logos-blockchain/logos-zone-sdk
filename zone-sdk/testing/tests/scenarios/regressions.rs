@@ -1,5 +1,5 @@
-//! Known SDK issues, each an ignored test with the issue in the reason;
-//! they turn green when the fix lands.
+//! Stories written for SDK issues: each is red until its fix lands and a
+//! regular test after.
 
 use super::*;
 
@@ -254,6 +254,87 @@ async fn config_shed_strands_the_custom_tx_chained_on_a_shed_inscription() {
     assert!(
         config.is_some_and(|hash| world.node().is_included(&hash)),
         "the writer's config did not land:\n{}",
+        world.diagnostics()
+    );
+    world.harness.assert_layers();
+}
+
+/// A rival's inscription is mined on the parent of `SEQ_A`'s pending hand-built
+/// tx with two inscriptions. Displaced as the block is observed, the tx must
+/// be reported orphaned whole, as the custom tx it is, so its consumer can
+/// republish both payloads.
+#[tokio::test(start_paused = true)]
+async fn displaced_custom_tx_is_reported_whole() {
+    let mut world = World::with_funding(chains::linear(), 400, 300_000);
+    let a = world.start("SEQ_A", passive()).await;
+    world.config_finalized(a, &[FOREIGN], 3, 0).await;
+    // Prices bind from the next block; funding reads them from the tip.
+    world.set_gas_prices(100);
+    world.extend(1, Posted::None).await;
+    let first = world.publish_included(a, "opens the lineage").await;
+    world.finalize_tx(first).await;
+
+    let channel_id = world.channel_id();
+    let parent = world
+        .node()
+        .channel_state_at_tip(channel_id)
+        .expect("channel")
+        .tip_message;
+    let (signed_tx, msg_id) = txs::build_funded_custom_tx(
+        world.node(),
+        channel_id,
+        &seq_key("SEQ_A"),
+        world.funding_pk(),
+        &[inscription("custom 1"), inscription("custom 2")],
+        parent,
+    )
+    .await
+    .expect("custom tx built");
+    let hash = signed_tx.hash();
+    world
+        .harness
+        .seq(a)
+        .handle()
+        .submit_signed_tx(signed_tx.clone(), msg_id)
+        .expect("submitted");
+    // Priced out, it never covers a block: the rival takes its parent.
+    world.set_gas_prices(200);
+    world.harness.settle().await;
+    // The raise binds from the next block; the rival must be funded at it.
+    world.extend(1, Posted::None).await;
+
+    world.add_writer_with(FOREIGN, &[WriterOp::Inscribe]);
+    world.enable_foreign_traffic(1);
+    let mined = world
+        .step_until(12, |w| {
+            w.writers[0]
+                .posted_hashes()
+                .next()
+                .is_some_and(|rival| w.node().is_included(&rival))
+        })
+        .await;
+    assert!(
+        mined,
+        "the rival inscription was not mined:\n{}",
+        world.diagnostics()
+    );
+    world.harness.settle().await;
+
+    let orphans = orphaned_entries(&world, a);
+    let report = orphans.iter().find(|entry| entry.tx_hash() == hash);
+    assert!(
+        matches!(report, Some(lb_zone_sdk::sequencer::ChannelUpdateTx::Custom(tx)) if *tx == signed_tx),
+        "the displaced custom tx was not reported whole: {report:?}\n{}",
+        world.diagnostics()
+    );
+    let still_pending = world
+        .checkpoint(a)
+        .pending_txs
+        .iter()
+        .any(|(pending, _)| *pending == hash);
+    assert!(
+        !still_pending,
+        "the displaced custom tx stayed pending:\n{}",
         world.diagnostics()
     );
     world.harness.assert_layers();
