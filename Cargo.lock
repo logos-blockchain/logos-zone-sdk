@@ -4159,6 +4159,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "logos-blockchain-client"
+version = "0.0.999"
+source = "git+https://github.com/logos-blockchain/logos-blockchain-module.git?rev=ac97b3293566b8df64ddcea95521a91b816862ae#ac97b3293566b8df64ddcea95521a91b816862ae"
+dependencies = [
+ "logos-blockchain-common-http-client",
+ "logos-blockchain-core",
+ "logos-blockchain-http-api-common",
+ "logos-rust-sdk",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "logos-blockchain-common-http-client"
 version = "0.0.0"
 source = "git+https://github.com/logos-blockchain/logos-blockchain.git?rev=a159f8c155df68d7e2f045a418ae737de246354e#a159f8c155df68d7e2f045a418ae737de246354e"
@@ -5148,6 +5162,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "logos-blockchain-zone-sdk-module-backend"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "logos-blockchain-client",
+ "logos-blockchain-zone-sdk",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "logos-blockchain-zone-tests"
 version = "0.0.0"
 dependencies = [
@@ -5167,6 +5193,15 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "logos-rust-sdk"
+version = "0.3.0"
+source = "git+https://github.com/logos-co/logos-rust-sdk?rev=b572e8172ca512b41c102d555f00258b859629c0#b572e8172ca512b41c102d555f00258b859629c0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
