@@ -34,7 +34,7 @@ use tracing::{debug, info, warn};
 
 use super::{
     TARGET,
-    block_fetch::{channel_inscriptions, classify_channel_tx},
+    block_fetch::{channel_configs, channel_inscriptions, classify_channel_tx},
     block_states::{ChannelTxKind, SharedTx},
     channel_wallet::select_channel_notes,
     client::SequencerClient,
@@ -1442,10 +1442,7 @@ where
         // rejected above and go through the consumer's `submit_signed_tx` flow.
         // We chain on the mined tip, not a config of ours still in flight: a
         // reconfiguration lands one at a time.
-        let parent = match (self.state.as_ref(), self.current_tip) {
-            (Some(state), Some(tip)) => state.config_tip_at(tip),
-            _ => MsgId::root(),
-        };
+        let parent = self.compute_config_tip();
 
         let signed_tx = create_channel_config_tx(
             &self.node,
@@ -1529,10 +1526,7 @@ where
         // Same config-lineage parent as `do_channel_config`: extend our local
         // config tip so the config we prepare is never transiently orphaned by
         // an ahead-of-us node config tip.
-        let parent = match (self.state.as_ref(), self.current_tip) {
-            (Some(state), Some(tip)) => state.config_tip_at(tip),
-            _ => MsgId::root(),
-        };
+        let parent = self.compute_config_tip();
 
         // Refuse early, before signatures are collected over it, if a config
         // already pends on this parent; expiry frees the position.
@@ -1623,6 +1617,13 @@ where
             .first()
             .map(|info| info.parent_msg);
         let publish_parent = self.compute_publish_parent();
+        // A config chains on the mined config tip or on a config of ours
+        // still pending; any other parent, one not produced yet included,
+        // can never land. Refuse it like a stale inscription parent.
+        let config_parent = channel_configs(&tx, self.channel_id)
+            .first()
+            .map(|info| info.parent_msg);
+        let config_tip = self.compute_config_tip();
         // Safe to unwrap — `ensure_ready` checks state.
         let state = self.state.as_mut().unwrap();
         if let Some(parent) = first_parent
@@ -1630,6 +1631,15 @@ where
             && let Some(stale) = stale_parent_reason(parent, publish_parent)
         {
             return Err(Error::ChannelStateChanged(stale));
+        }
+        if let Some(parent) = config_parent
+            && !state.is_tracked(&id)
+            && parent != config_tip
+            && !state.pends_config(parent)
+        {
+            return Err(Error::ChannelStateChanged(format!(
+                "config parent {parent:?} is neither the config tip {config_tip:?} nor pending"
+            )));
         }
         let derived_tip = track_pending_tx(state, tx.clone(), self.channel_id)?;
         state.stamp_funding(&id, self.lib_slot, None);
@@ -1706,6 +1716,14 @@ where
         let state = self.state.as_ref().unwrap();
         self.current_tip
             .map_or(self.last_msg_id, |tip| state.publish_parent(tip))
+    }
+
+    /// The mined config tip a config chains on; root before any block.
+    pub(super) fn compute_config_tip(&self) -> MsgId {
+        match (self.state.as_ref(), self.current_tip) {
+            (Some(state), Some(tip)) => state.config_tip_at(tip),
+            _ => MsgId::root(),
+        }
     }
 
     pub(super) fn emit_now(&self, event: Event) -> Event {

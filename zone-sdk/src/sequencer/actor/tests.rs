@@ -218,6 +218,57 @@ async fn submit_signed_tx_refuses_a_parent_with_a_mined_child() {
     assert_eq!(sequencer.state.as_ref().unwrap().pending_publish_count(), 1);
 }
 
+/// A hand-built config chains on the mined config tip or on a config of
+/// ours still pending; any other parent can never land and is refused at
+/// submit.
+#[tokio::test]
+async fn submit_signed_tx_refuses_an_unknown_config_parent() {
+    let channel_id = ChannelId::from([0; 32]);
+    let key = Ed25519Key::from_bytes(&[0; 32]);
+    let mut sequencer = ready_sequencer_with_channel(None, key.clone()).await;
+    let config_on = |parent: MsgId| {
+        ChannelConfigOp::new(
+            channel_id,
+            parent,
+            VerifiedChannelKeys::try_from(vec![key.public_key()]).unwrap(),
+            SlotTimeframe::from(0u32),
+            SlotTimeout::from(0u32),
+            NonZero::<u16>::MIN,
+            NonZero::<u16>::MIN,
+        )
+        .unwrap()
+    };
+    let tip = sequencer.compute_publish_parent();
+
+    let unknown_tx =
+        unverified_tx_with_ops(vec![Op::ChannelConfig(config_on(MsgId::from([9; 32])))]);
+    let result = sequencer.handle().submit_signed_tx(unknown_tx, tip);
+    assert!(
+        matches!(result, Err(Error::ChannelStateChanged(_))),
+        "a config parent the channel never produced must be refused, got {result:?}"
+    );
+    assert!(
+        sequencer
+            .checkpoint()
+            .is_none_or(|checkpoint| checkpoint.pending_txs.is_empty()),
+        "refused config must not be tracked"
+    );
+
+    let on_tip = config_on(MsgId::root());
+    let on_tip_id = on_tip.id();
+    let on_tip_tx = unverified_tx_with_ops(vec![Op::ChannelConfig(on_tip)]);
+    sequencer
+        .handle()
+        .submit_signed_tx(on_tip_tx, tip)
+        .expect("a config on the config tip is accepted");
+
+    let chained_tx = unverified_tx_with_ops(vec![Op::ChannelConfig(config_on(on_tip_id))]);
+    sequencer
+        .handle()
+        .submit_signed_tx(chained_tx, tip)
+        .expect("a config on a pending config of ours is accepted");
+}
+
 /// A gap block's deposit surfaces once, in order, even when the first
 /// backfill failed, the stream reconnected and the chain switched to
 /// another fork and back before the re-delivered event backfills the gap.
