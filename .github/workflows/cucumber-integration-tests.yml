@@ -1,5 +1,5 @@
 # The node repository runs its Cucumber suites only in the merge queue, on the
-# self-hosted runners, after review; pull requests only carry a lightweight
+# bladerunner runners, after review; pull requests only carry a lightweight
 # required check there. This repository has no branch protection yet, so the
 # lane runs in the merge queue and on demand, and the stable result check is
 # left out until the queue is configured.
@@ -28,13 +28,14 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          # Using self-hosted runners because we were running out of memory on GitHub-hosted runners
-          - os: [ self-hosted, Linux ]
-            label: self-hosted-linux
-          - os: [ self-hosted, macOS ]
-            label: self-hosted-macos
+          # Using the bladerunner runners because we were running out of memory on GitHub-hosted runners
+          - os: bladerunner-linux
+            label: bladerunner-linux
+          - os: bladerunner-macos
+            label: bladerunner-macos
     runs-on: ${{ matrix.platform.os }}
     env:
+      DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
       # The suites start real node processes. The node harness is a Git
       # dependency here, so it cannot build the node from this workspace: the
       # binary is built from the pinned node revision below and handed over
@@ -43,10 +44,6 @@ jobs:
       PASSWORD_MANAGER_BIN: ${{ github.workspace }}/target/debug/examples/password_manager
 
     steps:
-      # Remove any rustup override to ensure default toolchain is used
-      - name: Disable rustup override
-        run: rustup override unset || true
-
       - name: Expose gmp to cargo (macOS runners)
         if: runner.os == 'macOS'
         run: |
@@ -61,10 +58,6 @@ jobs:
         with:
           ref: ${{ github.sha }}
 
-      # Prune before any builds.
-      - name: Prune disk space (cache-aware, self-hosted)
-        uses: ./.github/actions/prune-disk-space
-
       # Every node crate in `Cargo.toml` is pinned to one revision; the node
       # binary must come from the same one.
       - name: Read the pinned node revision
@@ -78,14 +71,11 @@ jobs:
           echo "rev=$rev" >> "$GITHUB_OUTPUT"
 
       # `--features testing` matches the node harness's own node build.
-      # `--target-dir` keeps the node build cached between runs on the
-      # self-hosted runners; `--force` rebuilds even when the same revision is
-      # already installed there.
       - name: Build the node binary at the pinned revision
         env:
           CARGO_INCREMENTAL: 0  # Disable incremental compilation
         run: >-
-          cargo install --locked --force
+          cargo install --locked
           --git https://github.com/logos-blockchain/logos-blockchain.git
           --rev "${{ steps.node.outputs.rev }}"
           --features testing
@@ -135,7 +125,3 @@ jobs:
           artifacts_dir: tests/logos-sql/cucumber_tests/temp
           artifact_subdir: "Password manager"
           max_concurrent_scenarios: "1"
-
-      - name: Clean up cucumber artifacts
-        if: success() || failure()
-        run: rm -rf "${{ github.workspace }}/tests/zone-sdk/cucumber_tests/temp/cucumber_artefacts" "${{ github.workspace }}/tests/logos-sql/cucumber_tests/temp/cucumber_artefacts"
