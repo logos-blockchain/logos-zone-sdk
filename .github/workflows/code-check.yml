@@ -7,23 +7,15 @@ on:
 
 name: Code checks
 
-# All jobs run on the bladerunner runners.
-# Keep the stable unit-test result job for the merge queue.
 concurrency:
   group: ${{ github.workflow }}@${{ github.ref }}
   cancel-in-progress: true
-
-# Build settings match the node repository so `sccache` entries are shared.
-env:
-  DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
-  CARGO_INCREMENTAL: 0
-  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
   formatting:
     name: Check formatting
     if: ${{ github.event_name != 'merge_group' }}
-    runs-on: bladerunner-linux
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@85e6279cec87321a52edac9c87bce653a07cf6c2  # Version 4.2.2
@@ -40,9 +32,6 @@ jobs:
         with:
           command: fmt
           args: --all --check
-      # `CARGO_HOME` is relocated on bladerunner runners.
-      - name: Add Cargo's bin directory to PATH
-        run: echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"
       - name: Install taplo CLI
         run: cargo install taplo-cli --locked --version 0.10.0
       - name: Run taplo lint
@@ -54,7 +43,7 @@ jobs:
     name: Check cargo-deny rules
     if: ${{ github.event_name != 'merge_group' }}
     # `cargo-deny` action is only supported on Linux
-    runs-on: bladerunner-linux
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
@@ -62,10 +51,6 @@ jobs:
 
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
-
-      # `CARGO_HOME` is relocated on bladerunner runners.
-      - name: Add Cargo's bin directory to PATH
-        run: echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"
 
       # `cargo-deny`'s action is compiled and run using `musl` but we generally use `gnu` in our local machines.
       # Thus, results may differ from local runs.
@@ -79,7 +64,7 @@ jobs:
   workspace-deps:
     name: Check for correctly declared dependencies in the workspace
     if: ${{ github.event_name != 'merge_group' }}
-    runs-on: bladerunner-linux
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@85e6279cec87321a52edac9c87bce653a07cf6c2  # Version 4.2.2
@@ -92,7 +77,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ bladerunner-linux, bladerunner-macos ]
+        os: [ ubuntu-latest, macos-latest ]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository
@@ -110,7 +95,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ bladerunner-linux, bladerunner-macos ]
+        os: [ ubuntu-latest, macos-latest ]
     runs-on: ${{ matrix.os }}
     env:
       CARGO_BUILD_WARNINGS: deny
@@ -145,11 +130,33 @@ jobs:
     strategy:
       fail-fast: false # all OSes should be tested even if one fails (default: true)
       matrix:
-        os: [ bladerunner-linux, bladerunner-macos ]
+        os:
+          # Using self-hosted runners because we were running out of memory on GitHub-hosted runners
+          - bladerunner-linux
+          - bladerunner-macos
     runs-on: ${{ matrix.os }}
+    # Build settings match the node repository so `sccache` entries are shared.
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
+      # allows `sccache` to cache the workspace crates.
+      CARGO_INCREMENTAL: 0
+      # line tables are enough for backtraces.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - name: Checkout repository
         uses: actions/checkout@85e6279cec87321a52edac9c87bce653a07cf6c2  # Version 4.2.2
+
+      # Cargo recreates this checkout from its Git database after removal.
+      - name: Repair empty circuits manifest
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          checkout="/cache/cargo/git/checkouts/logos-blockchain-circuits-6ffb2cf5a63ddcbb/ebf7ddf"
+          manifest="$checkout/rust/logos-blockchain-circuits-types/Cargo.toml"
+          if [ -f "$manifest" ] && [ ! -s "$manifest" ]; then
+            echo "Removing circuits checkout with an empty manifest: $checkout"
+            rm -rf -- "$checkout"
+          fi
 
       - name: Check for a preinstalled cargo-nextest
         id: nextest
@@ -198,7 +205,7 @@ jobs:
     name: Nextest unit tests result
     needs: tests
     if: ${{ always() && github.event_name != 'push' }}
-    runs-on: bladerunner-linux
+    runs-on: ubuntu-latest
     steps:
       - name: Check nextest unit tests result
         env:
