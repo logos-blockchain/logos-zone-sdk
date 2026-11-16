@@ -146,6 +146,18 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@85e6279cec87321a52edac9c87bce653a07cf6c2  # Version 4.2.2
 
+      # Cargo recreates this checkout from its Git database after removal.
+      - name: Repair empty circuits manifest
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          checkout="/cache/cargo/git/checkouts/logos-blockchain-circuits-6ffb2cf5a63ddcbb/ebf7ddf"
+          manifest="$checkout/rust/logos-blockchain-circuits-types/Cargo.toml"
+          if [ -f "$manifest" ] && [ ! -s "$manifest" ]; then
+            echo "Removing circuits checkout with an empty manifest: $checkout"
+            rm -rf -- "$checkout"
+          fi
+
       - name: Check for a preinstalled cargo-nextest
         id: nextest
         shell: bash
