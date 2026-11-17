@@ -652,8 +652,10 @@ Feature: Zone SDK
       | NODE_4    | 4             | WALLET_4A   |              | SEQ_B      |
     When node "NODE_1" is at height 2 in 240 seconds
     # Starve the funding wallet to two distinct notes so the reused note is
-    # deterministic (largest-first selection picks 9000 for both publishes)
-    And I drain all node "NODE_1" wallets into "WALLET_1A"
+    # deterministic (largest-first selection picks 9000 for both publishes).
+    # Only the funding wallet: the voucher-master wallet is NODE_1's leader
+    # stake, and NODE_1 must keep producing blocks alone once NODE_4 stops.
+    And I drain wallet "NODE_1_WALLET_FUNDING" into "WALLET_1A"
     And wallet "WALLET_1A" has 14000 or more LGO in 240 seconds
     And wallet "WALLET_1A" sends 1 notes of 9000 LGO to node "NODE_1" funding wallet as "TOPUP_A"
     And wallet "WALLET_1A" sends 1 notes of 8000 LGO to node "NODE_1" funding wallet as "TOPUP_B"

@@ -87,8 +87,10 @@ jobs:
         # The action's default run omits `--with-metadata`, which can produce false positives.
         # Treat its result as advisory; the metadata-aware run below is authoritative.
         continue-on-error: true
+      # Only the workspace members: the excluded SQL crates pin a private git
+      # dependency that the runner cannot fetch.
       - name: Run cargo-machete
-        run: cargo machete --with-metadata
+        run: cargo machete --with-metadata zone-sdk tests/zone-sdk
 
   lints:
     name: Check Rust lints
