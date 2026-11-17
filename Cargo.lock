@@ -5073,7 +5073,6 @@ dependencies = [
  "logos-blockchain-key-management-system-service",
  "logos-blockchain-log-targets",
  "logos-blockchain-time",
- "num-bigint",
  "reqwest 0.12.28",
  "rpds",
  "serde",
