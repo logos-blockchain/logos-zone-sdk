@@ -3,7 +3,13 @@ use lb_core::{
         SignedOps,
         channel::{SlotTimeframe, SlotTimeout},
         ledger::verification_mode::StandardMode,
-        ops::channel::{MsgId, VerifiedChannelKeys, inscribe::Inscription},
+        ops::{
+            StepProof,
+            channel::{
+                MsgId, VerifiedChannelKeys,
+                inscribe::{Inscription, MiniBlocks},
+            },
+        },
         transactions::{Ops, states::Unverified},
     },
     proofs::channel_multi_sig_proof::IndexedSignatures,
@@ -13,8 +19,8 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use super::{
     types::{
-        Error, Event, PreparedChannelConfig, SequencerChannelView, SequencerCheckpoint,
-        TurnNotification,
+        Error, Event, PreparedChannelConfig, PreparedInscription, SequencerChannelView,
+        SequencerCheckpoint, TurnNotification,
     },
     zone_sequencer::ActorRequest,
 };
@@ -69,6 +75,40 @@ impl SequencerClient {
     pub async fn publish(&self, data: Inscription) -> Result<PublishReceipt, Error> {
         let (response_tx, response_rx) = oneshot::channel();
         self.send(ActorRequest::Publish { data, response_tx })?;
+        Self::recv(response_rx).await?
+    }
+
+    /// Fix an inscription applying `mini_blocks`, without publishing it.
+    ///
+    /// Async counterpart of [`super::SequencerHandle::prepare_inscription`].
+    pub async fn prepare_inscription(
+        &self,
+        data: Inscription,
+        mini_blocks: MiniBlocks,
+    ) -> Result<PreparedInscription, Error> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.send(ActorRequest::PrepareInscription {
+            data,
+            mini_blocks,
+            response_tx,
+        })?;
+        Self::recv(response_rx).await?
+    }
+
+    /// Enqueue a [`PreparedInscription`] with the proofs of its steps.
+    ///
+    /// Async counterpart of [`super::SequencerHandle::publish_prepared`].
+    pub async fn publish_prepared(
+        &self,
+        prepared: PreparedInscription,
+        step_proofs: Vec<StepProof>,
+    ) -> Result<PublishReceipt, Error> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.send(ActorRequest::PublishPrepared {
+            prepared: Box::new(prepared),
+            step_proofs,
+            response_tx,
+        })?;
         Self::recv(response_rx).await?
     }
 

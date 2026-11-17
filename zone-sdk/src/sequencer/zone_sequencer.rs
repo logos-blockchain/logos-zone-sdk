@@ -14,7 +14,13 @@ use lb_core::{
         OpRef, SignedOps,
         channel::{ChannelState, SlotTimeframe, SlotTimeout},
         ledger::verification_mode::StandardMode,
-        ops::channel::{ChannelId, MsgId, VerifiedChannelKeys, inscribe::Inscription},
+        ops::{
+            StepProof,
+            channel::{
+                ChannelId, MsgId, VerifiedChannelKeys,
+                inscribe::{Inscription, MiniBlocks},
+            },
+        },
         traits::Hashable as _,
         transactions::{Ops, hash::TxHash, states::Unverified},
     },
@@ -33,17 +39,18 @@ use super::{
     slot_clock::SlotClock,
     state::{ParentTaken, TxState},
     tx_builder::{
-        assemble_channel_config_tx, build_and_fund_config, create_channel_config_tx,
-        create_inscribe_tx, prepare_tx as build_prepare_tx, sign_tx as build_sign_tx,
-        stale_parent_reason, validate_multi_sig,
+        assemble_channel_config_tx, build_and_fund_config, check_step_proofs,
+        create_channel_config_tx, create_inscribe_tx, inscription_op,
+        prepare_tx as build_prepare_tx, sign_tx as build_sign_tx, stale_parent_reason,
+        validate_multi_sig,
     },
     types::{
         ChannelUpdateTx, Error, Event, FundingConfig, InscriptionInfo, PendingTx,
-        PreparedChannelConfig, PublishResult, SequencerChannelView, SequencerCheckpoint,
-        SequencerConfig, TurnNotification,
+        PreparedChannelConfig, PreparedInscription, PublishResult, SequencerChannelView,
+        SequencerCheckpoint, SequencerConfig, TurnNotification,
     },
 };
-use crate::{adapter, adapter::BoxStream};
+use crate::{InscriptionSteps, adapter, adapter::BoxStream, channel_inscribes};
 
 /// Zone sequencer.
 ///
@@ -164,6 +171,17 @@ pub type PublishResponse = (PublishReceipt, SignedOps<Unverified, StandardMode>)
 pub(super) enum ActorRequest {
     Publish {
         data: Inscription,
+        response_tx: oneshot::Sender<Result<PublishReceipt, Error>>,
+    },
+    PrepareInscription {
+        data: Inscription,
+        mini_blocks: MiniBlocks,
+        response_tx: oneshot::Sender<Result<PreparedInscription, Error>>,
+    },
+    PublishPrepared {
+        // Boxed: much larger than the other variants' payloads.
+        prepared: Box<PreparedInscription>,
+        step_proofs: Vec<StepProof>,
         response_tx: oneshot::Sender<Result<PublishReceipt, Error>>,
     },
     ChannelConfig {
@@ -586,6 +604,20 @@ where
             ActorRequest::Publish { data, response_tx } => {
                 drop(response_tx.send(self.do_publish(data).await));
             }
+            ActorRequest::PrepareInscription {
+                data,
+                mini_blocks,
+                response_tx,
+            } => {
+                drop(response_tx.send(self.do_prepare_inscription(data, mini_blocks)));
+            }
+            ActorRequest::PublishPrepared {
+                prepared,
+                step_proofs,
+                response_tx,
+            } => {
+                drop(response_tx.send(self.do_publish_prepared(*prepared, step_proofs).await));
+            }
             ActorRequest::ChannelConfig {
                 keys,
                 posting_timeframe,
@@ -718,17 +750,60 @@ where
     /// from the drive task) and the actor's [`ActorRequest::Publish`] handler
     /// (called from outside the drive task via [`SequencerClient`]).
     pub(super) async fn do_publish(&mut self, data: Inscription) -> Result<PublishReceipt, Error> {
+        let prepared = self.do_prepare_inscription(data, MiniBlocks::default())?;
+        self.do_publish_prepared(prepared, Vec::new()).await
+    }
+
+    /// Fix the parent and the steps of an inscription, for the caller to
+    /// prove its program steps against its `op_id`. Does not mutate state.
+    pub(super) fn do_prepare_inscription(
+        &self,
+        data: Inscription,
+        mini_blocks: MiniBlocks,
+    ) -> Result<PreparedInscription, Error> {
+        self.ensure_ready()?;
+        Ok(PreparedInscription {
+            op: inscription_op(
+                self.channel_id,
+                &self.signing_key,
+                data,
+                self.compute_publish_parent(),
+                mini_blocks,
+            ),
+        })
+    }
+
+    /// Fund, sign and enqueue a prepared inscription with the proofs of its
+    /// steps. Shared by [`SequencerHandle::publish_prepared`] and the
+    /// actor's [`ActorRequest::PublishPrepared`] handler.
+    pub(super) async fn do_publish_prepared(
+        &mut self,
+        prepared: PreparedInscription,
+        step_proofs: Vec<StepProof>,
+    ) -> Result<PublishReceipt, Error> {
         self.ensure_ready()?;
         self.ensure_fundable()?;
 
-        let parent = self.compute_publish_parent();
-        let (signed_tx, new_msg_id, pre_fund) = create_inscribe_tx(
+        let op = prepared.op;
+        check_step_proofs(&op, &step_proofs)?;
+        // The program proofs are bound to the `op_id`, which covers the
+        // parent: an inscription prepared on another tip cannot be re-parented.
+        let parent = op.parent;
+        if let Some(stale) = stale_parent_reason(parent, self.compute_publish_parent()) {
+            return Err(Error::ChannelStateChanged(stale));
+        }
+        let new_msg_id = op.id();
+        let data = op.inscription.clone();
+        let steps = InscriptionSteps {
+            mini_blocks: op.mini_blocks.clone(),
+            proofs: step_proofs.clone(),
+        };
+        let (signed_tx, pre_fund) = create_inscribe_tx(
             &self.node,
             &self.config.funding,
-            self.channel_id,
             &self.signing_key,
-            data.clone(),
-            parent,
+            op,
+            step_proofs,
         )
         .await?;
         let id = signed_tx.hash();
@@ -747,6 +822,7 @@ where
             this_msg: new_msg_id,
             payload: data.clone(),
             signer: Some(self.signing_key.public_key().into_unverified()),
+            steps,
         };
 
         // Safe to unwrap — `ensure_ready` checks state.
@@ -864,6 +940,7 @@ where
                 payload: Inscription::new_unchecked(Vec::new()),
                 // Config entry: authorized by a key threshold, no single author.
                 signer: None,
+                steps: InscriptionSteps::default(),
             }),
         };
         let publish_receipt = (publish_result, checkpoint);
@@ -1046,15 +1123,16 @@ where
 
         info!(target: TARGET, "Submitted tx including inscription {:?}", id);
 
-        let (payload, signer) = tx
-            .op_refs_iter()
-            .find_map(|op| match op {
-                OpRef::ChannelInscribe(i) if i.channel_id == self.channel_id => {
-                    Some((i.inscription.clone(), Some(i.signer)))
-                }
-                _ => None,
-            })
-            .unwrap_or_else(|| (Inscription::new_unchecked(Vec::new()), None));
+        let (payload, signer, steps) = channel_inscribes(&tx, self.channel_id).next().map_or_else(
+            || {
+                (
+                    Inscription::new_unchecked(Vec::new()),
+                    None,
+                    InscriptionSteps::default(),
+                )
+            },
+            |(inscribe, steps)| (inscribe.inscription.clone(), Some(inscribe.signer), steps),
+        );
 
         self.queue_publish_post(id, tx);
 
@@ -1070,6 +1148,7 @@ where
                     this_msg: new_tip,
                     payload,
                     signer,
+                    steps,
                 }),
             },
             checkpoint,

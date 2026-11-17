@@ -10,7 +10,7 @@ use lb_core::{
         SignedOps,
         ledger::verification_mode::StandardMode,
         ops::{
-            OpRef,
+            OpRef, StepProof,
             channel::{ChannelId, MsgId, inscribe::Inscription},
         },
         traits::Hashable as _,
@@ -31,11 +31,23 @@ fn inscription_signer(
     })
 }
 
+/// The steps of the inscription of `tx`, with their proofs.
+fn inscription_steps(tx: &SignedOps<Unverified, StandardMode>) -> InscriptionSteps {
+    tx.op_refs_iter()
+        .zip(tx.op_proof_refs_iter())
+        .find_map(|(op, proof)| match op {
+            OpRef::ChannelInscribe(inscribe) => Some(InscriptionSteps::of(inscribe, proof)),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
 use super::{
     block_fetch::{channel_configs, channel_inscriptions, is_pure_config},
     block_states::{BlockChannelTx, BlockStates, ChannelTxKind, SharedTx},
     types::{ChannelUpdateTx, DepositInfo, Error, InscriptionInfo, PendingFunding, PendingTx},
 };
+use crate::InscriptionSteps;
 
 /// Result of channel update detection — the linear block-level delta
 /// between two canonical chains.
@@ -186,6 +198,9 @@ type PendingFundingRecord = (Option<MantleTxBuilder>, Option<Slot>);
 pub struct RefundCandidate {
     pub tx_hash: TxHash,
     pub pre_fund: MantleTxBuilder,
+    /// The proofs of the steps of the inscription, which a re-funding keeps:
+    /// none is bound to the transaction hash.
+    pub step_proofs: Vec<StepProof>,
 }
 
 impl PendingInscription {
@@ -196,6 +211,7 @@ impl PendingInscription {
             this_msg: self.this_msg,
             payload: self.payload.clone(),
             signer: inscription_signer(&self.signed_tx),
+            steps: inscription_steps(&self.signed_tx),
         }
     }
 }
@@ -486,6 +502,7 @@ impl TxState {
                 p.pre_fund.clone().map(|pre_fund| RefundCandidate {
                     tx_hash: *hash,
                     pre_fund,
+                    step_proofs: inscription_steps(&p.signed_tx).proofs,
                 })
             })
             .collect();
@@ -2882,6 +2899,7 @@ mod tests {
             this_msg: mined_msg,
             payload: Inscription::new_unchecked(vec![1]),
             signer: Some(test_signer()),
+            steps: InscriptionSteps::default(),
         };
         state.process_block(
             b1,
@@ -2951,6 +2969,7 @@ mod tests {
             this_msg: msg,
             payload: Inscription::new_unchecked(vec![1]),
             signer: Some(test_signer()),
+            steps: InscriptionSteps::default(),
         };
         state.process_block(
             b1,
@@ -3157,6 +3176,7 @@ mod tests {
                 this_msg,
                 payload: Inscription::empty(),
                 signer: None,
+                steps: InscriptionSteps::default(),
             }),
         )
     }
@@ -3275,6 +3295,7 @@ mod tests {
             this_msg,
             payload: Inscription::empty(),
             signer: None,
+            steps: InscriptionSteps::default(),
         };
         let custom = stored(
             &tx,
@@ -3474,6 +3495,7 @@ mod tests {
             this_msg: msg_id(1),
             payload: Inscription::new_unchecked(vec![1]),
             signer: Some(test_signer()),
+            steps: InscriptionSteps::default(),
         };
         state.process_block(
             b1,
@@ -3675,6 +3697,7 @@ mod tests {
             this_msg: msg_id(1),
             payload: Inscription::new_unchecked(vec![1]),
             signer: Some(test_signer()),
+            steps: InscriptionSteps::default(),
         };
         state.process_block(
             b1,
@@ -3741,6 +3764,7 @@ mod tests {
             this_msg: c1_msg,
             payload: Inscription::new_unchecked(vec![99]),
             signer: Some(test_signer()),
+            steps: InscriptionSteps::default(),
         };
         // Mirror the observed inscription into pending before the safe-set
         // build, as `handle_block_event` does — the pending set reflects the
@@ -3868,6 +3892,7 @@ mod tests {
             this_msg: c1_msg,
             payload: Inscription::new_unchecked(vec![99]),
             signer: Some(test_signer()),
+            steps: InscriptionSteps::default(),
         };
         state.process_block(
             block2,
