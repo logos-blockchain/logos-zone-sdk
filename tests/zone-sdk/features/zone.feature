@@ -641,7 +641,7 @@ Feature: Zone SDK
   Scenario: Zone sequencer re-funds a double-handed inscription after node restart
     Given the genesis block has the following wallet resources:
       | account_index | token_count | token_amount |
-      | 1             | 2           | 12500        |
+      | 1             | 2           | 25000        |
       | 4             | 4           | 25000        |
     And I have a cluster with capacity of 2 nodes
     # NODE_4 is only a fork-provider; SEQ_B is registered but never started, so
