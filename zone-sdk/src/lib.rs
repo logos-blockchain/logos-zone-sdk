@@ -131,7 +131,7 @@ use lb_core::{
         ops::{
             OpProofRef, OpRef, StepProof,
             channel::{
-                ChannelId, MsgId,
+                MsgId,
                 deposit::Metadata,
                 inscribe::{Inscription, InscriptionOp, MiniBlocks},
             },
@@ -161,25 +161,18 @@ pub struct ZoneBlock {
     pub data: Inscription,
     /// The public key of the signer of this zone block.
     pub signer: UnverifiedEd25519PublicKey,
-    /// The moves of channel notes this zone block applies.
+    /// The steps of this zone block.
     pub steps: InscriptionSteps,
 }
 
-/// The steps an inscription applies to the notes of its channel, with their
-/// proofs.
+/// The steps of an inscription with their proofs, one per step.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InscriptionSteps {
-    /// The user steps, program deposits and program steps, grouped in
-    /// mini-blocks, in the order they apply.
     pub mini_blocks: MiniBlocks,
-    /// One proof per step, in step order. The proof of a program step
-    /// carries the openings of the program notes the step creates.
     pub proofs: Vec<StepProof>,
 }
 
 impl InscriptionSteps {
-    /// The steps of `op` with the proofs `proof`, the proof of `op` in its
-    /// signed transaction, holds for them.
     pub(crate) fn of(op: &InscriptionOp, proof: OpProofRef) -> Self {
         let OpProofRef::ChannelInscribe(proof) = proof else {
             unreachable!("a signed inscription carries an inscription proof")
@@ -191,15 +184,14 @@ impl InscriptionSteps {
     }
 }
 
-/// The inscriptions of `tx` on `channel_id` with their steps, in op order.
-pub(crate) fn channel_inscribes<State: VerificationState, Mode: VerificationMode>(
+/// The inscriptions of `tx` with their steps, in op order.
+pub(crate) fn inscribes<State: VerificationState, Mode: VerificationMode>(
     tx: &SignedOps<State, Mode>,
-    channel_id: ChannelId,
 ) -> impl Iterator<Item = (&InscriptionOp, InscriptionSteps)> {
     tx.op_refs_iter()
         .zip(tx.op_proof_refs_iter())
-        .filter_map(move |(op, proof)| match op {
-            OpRef::ChannelInscribe(inscribe) if inscribe.channel_id == channel_id => {
+        .filter_map(|(op, proof)| match op {
+            OpRef::ChannelInscribe(inscribe) => {
                 Some((inscribe, InscriptionSteps::of(inscribe, proof)))
             }
             _ => None,

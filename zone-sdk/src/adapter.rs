@@ -455,8 +455,6 @@ mod tests {
         }
     }
 
-    /// A zone block carries the steps its inscription applies, each with
-    /// its proof.
     #[test]
     fn block_to_messages_carries_the_steps_of_an_inscription() {
         let op = InscriptionOp::sample_with_step();

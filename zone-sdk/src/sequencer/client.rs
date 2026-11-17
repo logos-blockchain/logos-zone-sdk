@@ -7,7 +7,7 @@ use lb_core::{
             StepProof,
             channel::{
                 MsgId, VerifiedChannelKeys,
-                inscribe::{Inscription, MiniBlocks},
+                inscribe::{Inscription, InscriptionOp, MiniBlocks},
             },
         },
         transactions::{Ops, states::Unverified},
@@ -19,8 +19,8 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use super::{
     types::{
-        Error, Event, PreparedChannelConfig, PreparedInscription, SequencerChannelView,
-        SequencerCheckpoint, TurnNotification,
+        Error, Event, PreparedChannelConfig, SequencerChannelView, SequencerCheckpoint,
+        TurnNotification,
     },
     zone_sequencer::ActorRequest,
 };
@@ -78,14 +78,12 @@ impl SequencerClient {
         Self::recv(response_rx).await?
     }
 
-    /// Fix an inscription applying `mini_blocks`, without publishing it.
-    ///
     /// Async counterpart of [`super::SequencerHandle::prepare_inscription`].
     pub async fn prepare_inscription(
         &self,
         data: Inscription,
         mini_blocks: MiniBlocks,
-    ) -> Result<PreparedInscription, Error> {
+    ) -> Result<InscriptionOp, Error> {
         let (response_tx, response_rx) = oneshot::channel();
         self.send(ActorRequest::PrepareInscription {
             data,
@@ -95,17 +93,15 @@ impl SequencerClient {
         Self::recv(response_rx).await?
     }
 
-    /// Enqueue a [`PreparedInscription`] with the proofs of its steps.
-    ///
     /// Async counterpart of [`super::SequencerHandle::publish_prepared`].
     pub async fn publish_prepared(
         &self,
-        prepared: PreparedInscription,
+        op: InscriptionOp,
         step_proofs: Vec<StepProof>,
     ) -> Result<PublishReceipt, Error> {
         let (response_tx, response_rx) = oneshot::channel();
         self.send(ActorRequest::PublishPrepared {
-            prepared: Box::new(prepared),
+            op: Box::new(op),
             step_proofs,
             response_tx,
         })?;

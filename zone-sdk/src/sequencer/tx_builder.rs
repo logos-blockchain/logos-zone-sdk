@@ -181,8 +181,6 @@ pub fn sign_prepared(
     ))
 }
 
-/// The inscription of `inscription` on `channel_id` after `parent`, signed by
-/// `signing_key`, applying `mini_blocks`.
 pub(super) fn inscription_op(
     channel_id: ChannelId,
     signing_key: &Ed25519Key,
@@ -199,9 +197,7 @@ pub(super) fn inscription_op(
     }
 }
 
-/// Check that `step_proofs` holds one proof per step of `op`, of the kind its
-/// step takes: a `ZkTransfer` for a user step or a program deposit, a program
-/// step proof for a program step.
+/// Check that `step_proofs` holds one proof per step of `op`, of its kind.
 pub(super) fn check_step_proofs(
     op: &InscriptionOp,
     step_proofs: &[StepProof],
@@ -227,7 +223,6 @@ pub(super) fn check_step_proofs(
     Ok(())
 }
 
-/// Fund and sign the inscription `inscribe_op` with the proofs of its steps.
 pub(super) async fn create_inscribe_tx<Node>(
     node: &Node,
     funding: &FundingConfig,
@@ -244,8 +239,7 @@ where
     Ok((signed_tx, pre_fund))
 }
 
-/// Sign a funded inscription tx this sequencer built itself, whose steps are
-/// proven by `step_proofs`.
+/// Sign a funded inscription tx this sequencer built itself.
 pub(super) fn sign_own_tx(
     tx: Ops,
     transfer_proof: Option<OpProof>,
@@ -406,8 +400,6 @@ pub(super) fn prepare_tx(
     (ops, msg_id, inscription_sig)
 }
 
-/// The op proof of an inscription: the sequencer's signature over the tx
-/// hash and the proofs of its steps.
 pub(super) const fn inscribe_proof(
     signature: Ed25519Signature,
     step_proofs: Vec<StepProof>,

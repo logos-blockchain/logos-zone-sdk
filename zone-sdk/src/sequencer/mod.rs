@@ -91,13 +91,7 @@ pub use handle::SequencerHandle;
 pub use lb_core::{
     mantle::{
         Op,
-        ops::{
-            OpProof, StepProof,
-            channel::{
-                config::ChannelConfigOp,
-                inscribe::{MiniBlock, MiniBlocks, Step},
-            },
-        },
+        ops::{OpProof, channel::config::ChannelConfigOp},
         transactions::Ops,
     },
     proofs::channel_multi_sig_proof::{IndexedSignature, IndexedSignatures},
@@ -109,7 +103,7 @@ pub use tx_builder::sign_prepared;
 pub use types::{
     ChannelUpdate, ChannelUpdateTx, ConfigInfo, DepositInfo, Error, Event, FinalizedOp,
     FinalizedTx, FundingConfig, InscriptionId, InscriptionInfo, PendingFunding, PendingTx,
-    PreparedChannelConfig, PreparedInscription, PublishResult, SequencerChannelView,
-    SequencerCheckpoint, SequencerConfig, TurnNotification, WithdrawInfo,
+    PreparedChannelConfig, PublishResult, SequencerChannelView, SequencerCheckpoint,
+    SequencerConfig, TurnNotification, WithdrawInfo,
 };
 pub use zone_sequencer::ZoneSequencer;

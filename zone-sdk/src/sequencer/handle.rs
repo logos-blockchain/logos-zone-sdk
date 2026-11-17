@@ -7,7 +7,7 @@ use lb_core::{
             StepProof,
             channel::{
                 MsgId, VerifiedChannelKeys,
-                inscribe::{Inscription, MiniBlocks},
+                inscribe::{Inscription, InscriptionOp, MiniBlocks},
             },
         },
         transactions::{Ops, states::Unverified},
@@ -17,7 +17,7 @@ use lb_core::{
 use lb_key_management_system_service::keys::Ed25519Signature;
 
 use super::{
-    types::{Error, PreparedChannelConfig, PreparedInscription},
+    types::{Error, PreparedChannelConfig},
     zone_sequencer::ZoneSequencer,
 };
 use crate::{adapter, sequencer::zone_sequencer::PublishReceipt};
@@ -87,40 +87,23 @@ where
         self.sequencer.do_publish(data).await
     }
 
-    /// Fix an inscription applying `mini_blocks`, moves of channel notes,
-    /// without publishing it.
-    ///
-    /// A user step or a program deposit is proven by its holder before the
-    /// inscription exists, but the proofs of a program step are bound to the
-    /// `op_id` of its inscription, which covers the parent the sequencer
-    /// chains it on. The returned [`PreparedInscription`] fixes that parent
-    /// and gives the [`op_id`](PreparedInscription::op_id) to prove the
-    /// program steps against; publish it with [`Self::publish_prepared`].
-    /// Does not mutate sequencer state.
+    /// Build the inscription of `data` applying `mini_blocks` on the current
+    /// publish tip, without publishing it.
     pub fn prepare_inscription(
         &mut self,
         data: Inscription,
         mini_blocks: MiniBlocks,
-    ) -> Result<PreparedInscription, Error> {
+    ) -> Result<InscriptionOp, Error> {
         self.sequencer.do_prepare_inscription(data, mini_blocks)
     }
 
-    /// Enqueue a [`PreparedInscription`] with the proofs of its steps, one
-    /// per step in step order: a `ZkTransfer` for a user step or a program
-    /// deposit, a program step proof for a program step.
-    ///
-    /// Funds, signs and queues the inscription as [`Self::publish`] does.
-    /// Returns [`Error::ChannelStateChanged`] if the publish tip moved since
-    /// the inscription was prepared: its program proofs are bound to its
-    /// parent, so it must be prepared and proven again.
+    /// Enqueue a prepared inscription with one proof per step.
     pub async fn publish_prepared(
         &mut self,
-        prepared: PreparedInscription,
+        op: InscriptionOp,
         step_proofs: Vec<StepProof>,
     ) -> Result<PublishReceipt, Error> {
-        self.sequencer
-            .do_publish_prepared(prepared, step_proofs)
-            .await
+        self.sequencer.do_publish_prepared(op, step_proofs).await
     }
 
     /// Build an [`Ops`] for the given ops and an inscription message,

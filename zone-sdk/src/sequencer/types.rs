@@ -11,13 +11,10 @@ use lb_core::{
         ledger::verification_mode::StandardMode,
         notes::OutputCommitments,
         ops::{
-            Op, OpId as _, OpProof,
+            Op, OpProof,
             channel::{
-                ChannelId, MsgId,
-                config::ChannelConfigOp,
-                deposit::Metadata,
-                inscribe::{Inscription, InscriptionOp},
-                withdraw::ChannelWithdrawOp,
+                ChannelId, MsgId, config::ChannelConfigOp, deposit::Metadata,
+                inscribe::Inscription, withdraw::ChannelWithdrawOp,
             },
         },
         traits::Hashable as _,
@@ -25,7 +22,6 @@ use lb_core::{
     },
     proofs::channel_multi_sig_proof::IndexedSignature,
 };
-use lb_groth16::{Fr, fr_from_mod_bytes};
 use lb_key_management_system_service::keys::{Ed25519Key, UnverifiedEd25519PublicKey, ZkPublicKey};
 
 use super::tx_builder::sign_prepared;
@@ -370,9 +366,7 @@ pub enum Error {
     /// key. Not recoverable by retrying.
     #[error("signatures rejected: {0}")]
     InvalidMultiSig(String),
-    /// The step proofs do not fit the steps of the inscription: wrong count,
-    /// or a proof of the wrong kind for its step. Not recoverable by
-    /// retrying.
+    /// The step proofs do not fit the steps of the inscription.
     #[error("step proofs rejected: {0}")]
     InvalidStepProofs(String),
 }
@@ -576,38 +570,8 @@ pub struct InscriptionInfo {
     /// `None` for a channel-config entry, which is authorized by a threshold of
     /// keys rather than a single signer and carries no author.
     pub signer: Option<UnverifiedEd25519PublicKey>,
-    /// The moves of channel notes the inscription applies. Empty for a
-    /// channel-config entry.
+    /// The steps of the inscription.
     pub steps: InscriptionSteps,
-}
-
-/// An inscription whose parent and steps are fixed, waiting for the proofs of
-/// its steps.
-///
-/// Built by
-/// [`SequencerHandle::prepare_inscription`](super::SequencerHandle::prepare_inscription)
-/// and published with
-/// [`SequencerHandle::publish_prepared`](super::SequencerHandle::publish_prepared).
-#[derive(Debug, Clone)]
-pub struct PreparedInscription {
-    /// The inscription as it will be published.
-    pub op: InscriptionOp,
-}
-
-impl PreparedInscription {
-    /// The message ID the inscription will have on the channel.
-    #[must_use]
-    pub fn msg_id(&self) -> MsgId {
-        self.op.id()
-    }
-
-    /// The `op_id` of the inscription as a field element: the message the
-    /// `ZkProgramSpend` of each of its program steps is bound to, and the
-    /// third public input of their program proofs.
-    #[must_use]
-    pub fn op_id(&self) -> Fr {
-        fr_from_mod_bytes(&self.op.op_id())
-    }
 }
 
 /// A channel withdraw observed on chain: a holder taking its channel notes

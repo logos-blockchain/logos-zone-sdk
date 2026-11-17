@@ -31,14 +31,10 @@ fn inscription_signer(
     })
 }
 
-/// The steps of the inscription of `tx`, with their proofs.
 fn inscription_steps(tx: &SignedOps<Unverified, StandardMode>) -> InscriptionSteps {
-    tx.op_refs_iter()
-        .zip(tx.op_proof_refs_iter())
-        .find_map(|(op, proof)| match op {
-            OpRef::ChannelInscribe(inscribe) => Some(InscriptionSteps::of(inscribe, proof)),
-            _ => None,
-        })
+    inscribes(tx)
+        .next()
+        .map(|(_, steps)| steps)
         .unwrap_or_default()
 }
 
@@ -47,7 +43,7 @@ use super::{
     block_states::{BlockChannelTx, BlockStates, ChannelTxKind, SharedTx},
     types::{ChannelUpdateTx, DepositInfo, Error, InscriptionInfo, PendingFunding, PendingTx},
 };
-use crate::InscriptionSteps;
+use crate::{InscriptionSteps, inscribes};
 
 /// Result of channel update detection — the linear block-level delta
 /// between two canonical chains.
@@ -198,8 +194,6 @@ type PendingFundingRecord = (Option<MantleTxBuilder>, Option<Slot>);
 pub struct RefundCandidate {
     pub tx_hash: TxHash,
     pub pre_fund: MantleTxBuilder,
-    /// The proofs of the steps of the inscription, which a re-funding keeps:
-    /// none is bound to the transaction hash.
     pub step_proofs: Vec<StepProof>,
 }
 
@@ -2299,6 +2293,26 @@ mod tests {
         );
         assert!(state.pending_inscription(&funded).is_some());
         assert!(state.pending_inscription(&unfunded).is_none());
+    }
+
+    #[test]
+    fn refund_candidate_keeps_the_step_proofs() {
+        let genesis = header_id(0);
+        let tip = header_id(1);
+        let mut state = TxState::new(genesis, MsgId::root());
+        state.process_block(tip, genesis, genesis, vec![], vec![], vec![]);
+        let op = InscriptionOp::sample_with_step();
+        let tx = crate::test_support::unverified_tx_with_ops(vec![Op::ChannelInscribe(op.clone())]);
+        let hash = tx.hash();
+        let proofs = inscription_steps(&tx).proofs;
+        assert_eq!(proofs.len(), op.steps_len());
+        state
+            .submit_inscription(tx, op.parent, op.id(), op.inscription)
+            .unwrap();
+        state.stamp_funding(&hash, Slot::from(10), Some(MantleTxBuilder::new()));
+
+        let candidates = state.refund_candidates(tip, Slot::from(14), 3, usize::MAX);
+        assert_eq!(candidates[0].step_proofs, proofs);
     }
 
     /// Of an expired backlog only what the node holds or is about to receive

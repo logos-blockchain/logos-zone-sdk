@@ -34,7 +34,7 @@ use super::{
     *,
 };
 use crate::{
-    InscriptionSteps, channel_inscribes,
+    InscriptionSteps, inscribes,
     test_support::{
         FORK_DIGEST, MockNode, StreamEnd, StreamScript, api_block, funding_config, header_id,
         inscribe_op, live_event, scripts, single_key_channel_state, unverified_tx_with_ops,
@@ -378,14 +378,13 @@ async fn gap_deposits_surface_after_a_failed_backfill_and_a_fork_switch() {
 }
 
 /// Drive a sequencer with `stale_refund_slots = window` through a
-/// publish applying `steps` and two LIB advances; returns how many fund calls
-/// the node saw within `for_at_most` and the checkpoint published last. Posts
+/// publish and two LIB advances; returns how many fund calls the node
+/// saw within `for_at_most` and the checkpoint published last. Posts
 /// are no signal: the resubmit pass re-posts every unmined entry on each
 /// tick regardless.
 async fn drive_stale_publish(
     window: u64,
     for_at_most: std::time::Duration,
-    steps: InscriptionSteps,
 ) -> (usize, SequencerCheckpoint) {
     let channel_id = ChannelId::from([0; 32]);
     let sequencer_key = Ed25519Key::from_bytes(&[0; 32]);
@@ -434,15 +433,7 @@ async fn drive_stale_publish(
             break;
         }
     }
-    let publish = async {
-        let prepared = client
-            .prepare_inscription(
-                Inscription::new_unchecked(b"stale".to_vec()),
-                steps.mini_blocks,
-            )
-            .await?;
-        client.publish_prepared(prepared, steps.proofs).await
-    };
+    let publish = client.publish(Inscription::new_unchecked(b"stale".to_vec()));
     tokio::select! {
         result = publish => drop(result.expect("publish is accepted after Ready")),
         () = async { loop { drop(sequencer.next_event().await); } } => unreachable!(),
@@ -483,12 +474,7 @@ async fn drive_stale_publish(
 /// of the publish.
 #[tokio::test]
 async fn stale_publish_is_refunded() {
-    let (fund_calls, checkpoint) = drive_stale_publish(
-        1,
-        std::time::Duration::from_secs(5),
-        InscriptionSteps::default(),
-    )
-    .await;
+    let (fund_calls, checkpoint) = drive_stale_publish(1, std::time::Duration::from_secs(5)).await;
     assert_eq!(fund_calls, 2, "the publish's funding, then the rebuild's");
     assert_eq!(checkpoint.funding.len(), 1);
     assert_eq!(
@@ -498,8 +484,6 @@ async fn stale_publish_is_refunded() {
     );
 }
 
-/// The steps of `InscriptionOp::sample_with_step`, a user step, a program
-/// deposit and a program step, each with a sample proof of the kind it takes.
 fn sample_steps() -> InscriptionSteps {
     let op = InscriptionOp::sample_with_step();
     InscriptionSteps {
@@ -511,26 +495,8 @@ fn sample_steps() -> InscriptionSteps {
     }
 }
 
-/// A re-funding changes the transaction hash only, which no step proof is
-/// bound to: the rebuilt inscription keeps its steps and their proofs.
-#[tokio::test]
-async fn refunded_inscription_keeps_its_steps_and_their_proofs() {
-    let steps = sample_steps();
-    let (fund_calls, checkpoint) =
-        drive_stale_publish(1, std::time::Duration::from_secs(5), steps.clone()).await;
-    assert_eq!(fund_calls, 2, "the publish's funding, then the rebuild's");
-    let (_, rebuilt) = &checkpoint.pending_txs[0];
-    let (_, rebuilt_steps) = channel_inscribes(rebuilt, ChannelId::from([0; 32]))
-        .next()
-        .expect("the rebuilt tx carries the inscription");
-    assert_eq!(rebuilt_steps, steps);
-}
-
-/// A prepared inscription is published with its steps and their proofs, and
-/// reports them in its receipt.
 #[tokio::test]
 async fn publish_prepared_carries_the_steps_and_their_proofs() {
-    let channel_id = ChannelId::from([0; 32]);
     let mut sequencer = ready_sequencer_with_channel(
         Some(single_key_channel_state()),
         Ed25519Key::from_bytes(&[0; 32]),
@@ -552,19 +518,16 @@ async fn publish_prepared_carries_the_steps_and_their_proofs() {
         .expect("a prepared inscription with fitting proofs is published");
 
     let info = result.tx.inscription();
-    assert_eq!(info.this_msg, prepared.msg_id());
+    assert_eq!(info.this_msg, prepared.id());
     assert_eq!(info.steps, steps);
     let (_, pending) = &checkpoint.pending_txs[0];
-    let (inscribe, pending_steps) = channel_inscribes(pending, channel_id)
+    let (inscribe, pending_steps) = inscribes(pending)
         .next()
         .expect("the pending tx carries the inscription");
-    assert_eq!(inscribe, &prepared.op);
+    assert_eq!(inscribe, &prepared);
     assert_eq!(pending_steps, steps);
 }
 
-/// Proofs that do not fit the steps are refused before funding, and so is an
-/// inscription prepared on a tip another publish has since taken: its
-/// program proofs are bound to that parent.
 #[tokio::test]
 async fn publish_prepared_refuses_misfit_proofs_and_a_moved_tip() {
     let mut sequencer = ready_sequencer_with_channel(
@@ -589,7 +552,6 @@ async fn publish_prepared_refuses_misfit_proofs_and_a_moved_tip() {
             .await,
         Err(Error::InvalidStepProofs(_))
     ));
-    // The program step proof under the user step.
     let wrong_kinds = steps.proofs.iter().rev().cloned().collect();
     assert!(matches!(
         sequencer
@@ -670,12 +632,7 @@ async fn funding_record_survives_a_checkpoint_round_trip() {
 
 #[tokio::test]
 async fn disabled_refund_window_never_refunds() {
-    let (fund_calls, checkpoint) = drive_stale_publish(
-        0,
-        std::time::Duration::from_secs(1),
-        InscriptionSteps::default(),
-    )
-    .await;
+    let (fund_calls, checkpoint) = drive_stale_publish(0, std::time::Duration::from_secs(1)).await;
     assert_eq!(fund_calls, 1);
     assert_eq!(checkpoint.funding[0].funded_at, Slot::from(0));
 }

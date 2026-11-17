@@ -18,7 +18,7 @@ use lb_core::{
             StepProof,
             channel::{
                 ChannelId, MsgId, VerifiedChannelKeys,
-                inscribe::{Inscription, MiniBlocks},
+                inscribe::{Inscription, InscriptionOp, MiniBlocks},
             },
         },
         traits::Hashable as _,
@@ -46,11 +46,11 @@ use super::{
     },
     types::{
         ChannelUpdateTx, Error, Event, FundingConfig, InscriptionInfo, PendingTx,
-        PreparedChannelConfig, PreparedInscription, PublishResult, SequencerChannelView,
-        SequencerCheckpoint, SequencerConfig, TurnNotification,
+        PreparedChannelConfig, PublishResult, SequencerChannelView, SequencerCheckpoint,
+        SequencerConfig, TurnNotification,
     },
 };
-use crate::{InscriptionSteps, adapter, adapter::BoxStream, channel_inscribes};
+use crate::{InscriptionSteps, adapter, adapter::BoxStream, inscribes};
 
 /// Zone sequencer.
 ///
@@ -176,11 +176,10 @@ pub(super) enum ActorRequest {
     PrepareInscription {
         data: Inscription,
         mini_blocks: MiniBlocks,
-        response_tx: oneshot::Sender<Result<PreparedInscription, Error>>,
+        response_tx: oneshot::Sender<Result<InscriptionOp, Error>>,
     },
     PublishPrepared {
-        // Boxed: much larger than the other variants' payloads.
-        prepared: Box<PreparedInscription>,
+        op: Box<InscriptionOp>,
         step_proofs: Vec<StepProof>,
         response_tx: oneshot::Sender<Result<PublishReceipt, Error>>,
     },
@@ -612,11 +611,11 @@ where
                 drop(response_tx.send(self.do_prepare_inscription(data, mini_blocks)));
             }
             ActorRequest::PublishPrepared {
-                prepared,
+                op,
                 step_proofs,
                 response_tx,
             } => {
-                drop(response_tx.send(self.do_publish_prepared(*prepared, step_proofs).await));
+                drop(response_tx.send(self.do_publish_prepared(*op, step_proofs).await));
             }
             ActorRequest::ChannelConfig {
                 keys,
@@ -754,40 +753,30 @@ where
         self.do_publish_prepared(prepared, Vec::new()).await
     }
 
-    /// Fix the parent and the steps of an inscription, for the caller to
-    /// prove its program steps against its `op_id`. Does not mutate state.
     pub(super) fn do_prepare_inscription(
         &self,
         data: Inscription,
         mini_blocks: MiniBlocks,
-    ) -> Result<PreparedInscription, Error> {
+    ) -> Result<InscriptionOp, Error> {
         self.ensure_ready()?;
-        Ok(PreparedInscription {
-            op: inscription_op(
-                self.channel_id,
-                &self.signing_key,
-                data,
-                self.compute_publish_parent(),
-                mini_blocks,
-            ),
-        })
+        Ok(inscription_op(
+            self.channel_id,
+            &self.signing_key,
+            data,
+            self.compute_publish_parent(),
+            mini_blocks,
+        ))
     }
 
-    /// Fund, sign and enqueue a prepared inscription with the proofs of its
-    /// steps. Shared by [`SequencerHandle::publish_prepared`] and the
-    /// actor's [`ActorRequest::PublishPrepared`] handler.
     pub(super) async fn do_publish_prepared(
         &mut self,
-        prepared: PreparedInscription,
+        op: InscriptionOp,
         step_proofs: Vec<StepProof>,
     ) -> Result<PublishReceipt, Error> {
         self.ensure_ready()?;
         self.ensure_fundable()?;
 
-        let op = prepared.op;
         check_step_proofs(&op, &step_proofs)?;
-        // The program proofs are bound to the `op_id`, which covers the
-        // parent: an inscription prepared on another tip cannot be re-parented.
         let parent = op.parent;
         if let Some(stale) = stale_parent_reason(parent, self.compute_publish_parent()) {
             return Err(Error::ChannelStateChanged(stale));
@@ -1123,16 +1112,18 @@ where
 
         info!(target: TARGET, "Submitted tx including inscription {:?}", id);
 
-        let (payload, signer, steps) = channel_inscribes(&tx, self.channel_id).next().map_or_else(
-            || {
-                (
-                    Inscription::new_unchecked(Vec::new()),
-                    None,
-                    InscriptionSteps::default(),
-                )
-            },
-            |(inscribe, steps)| (inscribe.inscription.clone(), Some(inscribe.signer), steps),
-        );
+        let (payload, signer, steps) = inscribes(&tx)
+            .find(|(inscribe, _)| inscribe.channel_id == self.channel_id)
+            .map_or_else(
+                || {
+                    (
+                        Inscription::new_unchecked(Vec::new()),
+                        None,
+                        InscriptionSteps::default(),
+                    )
+                },
+                |(inscribe, steps)| (inscribe.inscription.clone(), Some(inscribe.signer), steps),
+            );
 
         self.queue_publish_post(id, tx);
 

@@ -31,7 +31,7 @@ use super::{
 use crate::{
     InscriptionSteps, adapter,
     adapter::{DepositEvents, DepositOpKey},
-    channel_inscribes,
+    inscribes,
 };
 
 /// Result of processing a block event.
@@ -429,7 +429,8 @@ pub fn channel_inscriptions(
     channel_id: ChannelId,
 ) -> Vec<InscriptionInfo> {
     let tx_hash = tx.op_refs().hash();
-    channel_inscribes(tx, channel_id)
+    inscribes(tx)
+        .filter(|(inscribe, _)| inscribe.channel_id == channel_id)
         .map(|(inscribe, steps)| InscriptionInfo {
             tx_hash,
             parent_msg: inscribe.parent,
