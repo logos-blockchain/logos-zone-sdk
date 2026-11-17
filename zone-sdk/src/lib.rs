@@ -82,6 +82,7 @@ mod test_support;
 pub use lb_binary_codec as binary_codec;
 pub use lb_common_http_client as common_http_client;
 pub use lb_core as core;
+pub use lb_groth16 as groth16;
 pub use lb_http_api_common as http_api_common;
 pub use lb_key_management_system_service as key_management_system_service;
 #[cfg(feature = "testing")]
