@@ -1,5 +1,8 @@
 [workspace]
-members  = ["logos_sql", "tests/logos-sql", "tests/zone-sdk", "zone-sdk"]
+# TODO(private-utxo): the SQL crates are out of the build until they are migrated
+# to the private UTXO model.
+exclude  = ["logos_sql", "tests/logos-sql"]
+members  = ["tests/zone-sdk", "zone-sdk"]
 resolver = "2"
 
 [workspace.package]

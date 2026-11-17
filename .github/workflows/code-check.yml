@@ -183,7 +183,7 @@ jobs:
           args: >-
             run --workspace --locked --lib --bins --examples --tests --retries 2
             --all-features --no-fail-fast
-            --exclude logos-blockchain-zone-tests --exclude logos-blockchain-sql-tests
+            --exclude logos-blockchain-zone-tests
 
       # Include the support libraries without invoking their Cucumber runners.
       - name: Run client test support unit tests
@@ -192,7 +192,7 @@ jobs:
           command: nextest
           args: >-
             run --locked --lib --retries 2 --no-fail-fast
-            -p logos-blockchain-zone-tests -p logos-blockchain-sql-tests
+            -p logos-blockchain-zone-tests
 
   # Stable required check for nextest unit tests.
   #

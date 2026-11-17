@@ -8,12 +8,13 @@ use lb_common_http_client::{
 };
 use lb_core::{
     crypto::Hash,
-    events::{DepositRecreatedNotes, TxEvent},
+    events::TxEvent,
     header::HeaderId,
     mantle::{
-        SignedOps, Value,
+        SignedOps,
         channel::ChannelState,
         ledger::verification_mode::{StandardMode, VerificationMode},
+        notes::OutputCommitments,
         ops::{OpId as _, OpRef, channel::ChannelId},
         traits::Hashable as _,
         transactions::{
@@ -231,12 +232,11 @@ pub(crate) struct DepositOpKey {
     pub op_id: Hash,
 }
 
-/// A deposit's block-event payload: the deposited total and the channel
-/// notes the deposit re-created.
+/// A deposit's block-event payload: the channel notes the deposit created,
+/// as commitments.
 #[derive(Debug, Clone)]
 pub(crate) struct DepositEvent {
-    pub amount: Value,
-    pub notes: DepositRecreatedNotes,
+    pub outputs: OutputCommitments,
 }
 
 /// Per-block lookup of deposit events by op identity.
@@ -251,28 +251,27 @@ pub(crate) fn build_deposit_events(events: &Events) -> DepositEvents {
             Event::Tx(TxEvent {
                 tx_hash,
                 op_id,
-                payload: TxEventPayload::Deposit { amount, notes, .. },
+                payload: TxEventPayload::Deposit { outputs, .. },
             }) => Some((
                 DepositOpKey {
                     tx_hash: *tx_hash,
                     op_id: *op_id,
                 },
                 DepositEvent {
-                    amount: *amount,
-                    notes: notes.clone(),
+                    outputs: outputs.clone(),
                 },
             )),
-            Event::Tx { .. } | Event::Header(_) => None,
+            Event::Tx { .. } | Event::Header(_) | Event::Block(_) => None,
         })
         .collect()
 }
 
-/// Fetch the deposit-amount lookup for a single block, gated on whether the
+/// Fetch the deposit-event lookup for a single block, gated on whether the
 /// block has any deposit op for our channel.
 ///
 /// Per node semantics, a block and its events are atomically visible — so a
 /// block containing a deposit op must yield an event for that op. The
-/// returned `HashMap` is therefore the *complete* `(tx_hash, op_id) → amount`
+/// returned `HashMap` is therefore the *complete* `(tx_hash, op_id) → event`
 /// lookup for every deposit op of our channel in this block.
 ///
 /// On any failure (HTTP error, `Ok(None)`, or events missing an entry for
@@ -346,7 +345,7 @@ where
 }
 
 /// Walks a block's transactions and emits the [`ZoneMessage`]s relevant to
-/// `channel_id`, looking up deposit amounts and notes from `deposit_events`.
+/// `channel_id`, looking up the created notes from `deposit_events`.
 fn block_to_messages<State: VerificationState, Mode: VerificationMode>(
     transactions: Vec<SignedOps<State, Mode>>,
     channel_id: ChannelId,
@@ -395,9 +394,7 @@ fn op_to_zone_message(
             Some(ZoneMessage::Deposit(Deposit {
                 tx_hash,
                 op_id,
-                inputs: deposit.inputs.clone(),
-                notes: event.notes.clone(),
-                amount: event.amount,
+                outputs: event.outputs.clone(),
                 metadata: deposit.metadata.clone(),
             }))
         }
@@ -406,6 +403,7 @@ fn op_to_zone_message(
                 tx_hash,
                 op_id: withdraw.op_id(),
                 inputs: withdraw.inputs.clone(),
+                outputs: withdraw.outputs.clone(),
             }))
         }
         _ => None,
@@ -416,8 +414,8 @@ fn op_to_zone_message(
 mod tests {
     use futures::StreamExt as _;
     use lb_core::mantle::{
-        NoteId, Op,
-        ledger::BoundedInputs,
+        Op,
+        notes::{NoteCommitment, NoteNullifier},
         ops::channel::{
             deposit::{DepositOp, Metadata},
             withdraw::ChannelWithdrawOp,
@@ -431,19 +429,24 @@ mod tests {
     fn deposit_op(channel_id: ChannelId, input_seed: u32, metadata: Metadata) -> DepositOp {
         DepositOp {
             channel_id,
-            inputs: BoundedInputs::from(NoteId::from(Fr::from(input_seed))).into(),
+            inputs: [NoteNullifier(Fr::from(input_seed))].into(),
+            outputs: [NoteCommitment(Fr::from(u64::from(input_seed) + 100))].into(),
+            commitment_merkle_root: Fr::from(7u64),
+            excess_value: 0,
             metadata,
         }
     }
 
-    /// A withdraw op is identified by `hash(channel_id || inputs)` — it
-    /// carries no nonce — so distinct `input_seed`s are what give two
-    /// withdraws distinct `op_id`s. That mirrors the chain, where the notes
-    /// being released are spent-once.
+    /// A withdraw op is identified by its encoding — it carries no nonce — so
+    /// distinct `input_seed`s are what give two withdraws distinct `op_id`s.
+    /// That mirrors the chain, where the nullifiers being spent are
+    /// spent-once.
     fn withdraw_op(channel_id: ChannelId, input_seed: u32) -> ChannelWithdrawOp {
         ChannelWithdrawOp {
             channel_id,
-            inputs: BoundedInputs::from(NoteId::from(Fr::from(input_seed))).into(),
+            inputs: [NoteNullifier(Fr::from(input_seed))].into(),
+            outputs: [NoteCommitment(Fr::from(u64::from(input_seed) + 200))].into(),
+            commitment_merkle_root: Fr::from(7u64),
         }
     }
 
@@ -479,7 +482,7 @@ mod tests {
         let tx_b_hash = tx_b.hash();
 
         // Both deposits get an event, so channel filtering is proven to be
-        // the reason the foreign one is dropped — not a missing amount.
+        // the reason the foreign one is dropped — not a missing event.
         let deposit_events = DepositEvents::from([
             (
                 DepositOpKey {
@@ -487,8 +490,7 @@ mod tests {
                     op_id: our_deposit.op_id(),
                 },
                 DepositEvent {
-                    amount: 1234,
-                    notes: DepositRecreatedNotes::default(),
+                    outputs: our_deposit.outputs.clone(),
                 },
             ),
             (
@@ -497,8 +499,7 @@ mod tests {
                     op_id: foreign_deposit.op_id(),
                 },
                 DepositEvent {
-                    amount: 999,
-                    notes: DepositRecreatedNotes::default(),
+                    outputs: foreign_deposit.outputs,
                 },
             ),
         ]);
@@ -514,8 +515,7 @@ mod tests {
             ZoneMessage::Deposit(deposit) => {
                 assert_eq!(deposit.tx_hash, tx_a_hash);
                 assert_eq!(deposit.op_id, our_deposit.op_id());
-                assert_eq!(deposit.amount, 1234);
-                assert_eq!(deposit.inputs, our_deposit.inputs);
+                assert_eq!(deposit.outputs, our_deposit.outputs);
                 assert_ne!(
                     deposit.op_id,
                     our_withdraw.op_id(),
@@ -529,6 +529,7 @@ mod tests {
                 assert_eq!(withdraw.tx_hash, tx_a_hash);
                 assert_eq!(withdraw.op_id, our_withdraw.op_id());
                 assert_eq!(withdraw.inputs, our_withdraw.inputs);
+                assert_eq!(withdraw.outputs, our_withdraw.outputs);
             }
             other => panic!("expected Withdraw, got {other:?}"),
         }
@@ -666,7 +667,7 @@ mod tests {
         let channel_id = ChannelId::from([0; 32]);
         let op = deposit_op(channel_id, 1, Metadata::new_unchecked(b"to Alice".to_vec()));
         let tx = unverified_tx_with_ops(vec![Op::ChannelDeposit(op.clone())]);
-        let events = deposit_event(&tx, &op, 1234, Vec::new());
+        let events = deposit_event(&tx, &op);
         let node = node_with_block(api_block(1, 0, 1, vec![tx]), Some(events));
 
         let messages: Vec<_> = node
@@ -680,7 +681,7 @@ mod tests {
             matches!(
                 messages.as_slice(),
                 [(ZoneMessage::Deposit(deposit), slot)]
-                    if deposit.op_id == op.op_id() && deposit.amount == 1234 && *slot == 1.into()
+                    if deposit.op_id == op.op_id() && deposit.outputs == op.outputs && *slot == 1.into()
             ),
             "{messages:?}"
         );
@@ -711,7 +712,7 @@ mod tests {
             Op::ChannelDeposit(first.clone()),
             Op::ChannelDeposit(second),
         ]);
-        let events = deposit_event(&tx, &first, 1234, Vec::new());
+        let events = deposit_event(&tx, &first);
         let block = api_block(1, 0, 1, vec![tx]);
         let id = block.header.id;
         let node = node_with_block(block, Some(events));

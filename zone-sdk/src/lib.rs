@@ -106,12 +106,11 @@ pub mod node_types {
     };
     pub use lb_core::{
         crypto::Hash,
-        events::DepositRecreatedNotes,
         header::HeaderId,
         mantle::{
             SignedOps, TxHash, Value,
             channel::ChannelState,
-            ledger::Inputs,
+            notes::{InputNullifiers, OutputCommitments},
             ops::channel::{ChannelId, MsgId, deposit::Metadata, inscribe::Inscription},
             transactions::states::Unverified,
         },
@@ -125,10 +124,9 @@ pub mod node_types {
 pub use lb_common_http_client::{CommonHttpClient, Slot};
 use lb_core::{
     crypto::Hash,
-    events::DepositRecreatedNotes,
     mantle::{
-        TxHash, Value,
-        ledger::Inputs,
+        TxHash,
+        notes::{InputNullifiers, OutputCommitments},
         ops::channel::{MsgId, deposit::Metadata, inscribe::Inscription},
     },
 };
@@ -164,14 +162,9 @@ pub struct Deposit {
     /// The `op_id` of the deposit op: its stable identity within the tx,
     /// matching `DepositInfo::op_id` on the sequencer side.
     pub op_id: Hash,
-    /// Notes consumed by the deposit (spent-once at the UTXO layer).
-    pub inputs: Inputs,
-    /// The channel notes the deposit re-created its inputs as, sourced from
-    /// the block's events. These carry new `NoteId`s and are what the channel
-    /// now owns.
-    pub notes: DepositRecreatedNotes,
-    /// Total value deposited, sourced from the block's events.
-    pub amount: Value,
+    /// The channel notes the deposit created, as commitments, sourced from
+    /// the block's events. Their values and holders are private.
+    pub outputs: OutputCommitments,
     /// Opaque metadata associated with this deposit
     pub metadata: Metadata,
 }
@@ -183,8 +176,11 @@ pub struct Withdraw {
     pub tx_hash: TxHash,
     /// The `op_id` of the withdraw op: its stable identity within the tx.
     pub op_id: Hash,
-    /// The channel notes released by the withdrawal
-    pub inputs: Inputs,
+    /// The nullifiers of the channel notes the holder withdraws.
+    pub inputs: InputNullifiers,
+    /// The commitments of the ledger notes it creates, released at its due
+    /// slot.
+    pub outputs: OutputCommitments,
 }
 
 impl Deposit {

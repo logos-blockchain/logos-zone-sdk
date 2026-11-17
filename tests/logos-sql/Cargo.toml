@@ -8,6 +8,8 @@ name        = "logos-blockchain-sql-tests"
 publish     = false
 repository  = { workspace = true }
 version     = { workspace = true }
+# TODO(private-utxo): member of the pinned SQL workspace, see ../../logos_sql/Cargo.toml.
+workspace = "../../logos_sql"
 
 [lints]
 workspace = true

@@ -17,10 +17,10 @@ use lb_common_http_client::{
 };
 use lb_core::{
     era::ForkDigest,
-    events::{DepositNote, Event as ChainEvent, TxEvent, TxEventPayload},
+    events::{Event as ChainEvent, TxEvent, TxEventPayload},
     header::{ContentId, HeaderId},
     mantle::{
-        Op, SignedOps, Value,
+        Op, SignedOps,
         channel::ChannelState,
         gas::GasCost,
         ledger::verification_mode::StandardMode,
@@ -29,7 +29,7 @@ use lb_core::{
             channel::{
                 ChannelId, MsgId, UnverifiedChannelKeys,
                 deposit::DepositOp,
-                inscribe::{Inscription, InscriptionOp},
+                inscribe::{Inscription, InscriptionOp, MiniBlocks},
             },
         },
         traits::Hashable as _,
@@ -384,7 +384,6 @@ impl adapter::Node for MockNode {
 pub fn funding_config() -> FundingConfig {
     FundingConfig {
         funding_pk: Fr::from(1u64).into(),
-        change_pk: None,
         max_tx_fee: GasCost::new(u64::MAX),
         priority_fee_percent: FundingConfig::DEFAULT_PRIORITY_FEE_PERCENT,
     }
@@ -408,7 +407,6 @@ pub fn single_key_channel_state() -> ChannelState {
         tip_sequencer_starting_slot: Slot::default(),
         posting_timeframe: 0u32.into(),
         posting_timeout: 0u32.into(),
-        transfer_threshold: 1,
     }
 }
 
@@ -467,24 +465,19 @@ pub fn inscribe_op(channel_id: ChannelId, parent: MsgId, payload: &[u8]) -> Insc
         signer: Ed25519Key::from_bytes(&[0u8; 32])
             .public_key()
             .into_unverified(),
+        mini_blocks: MiniBlocks::default(),
     }
 }
 
-/// A `Deposit` block event matching `op` inside `tx`, recreating `notes`.
-pub fn deposit_event(
-    tx: &SignedOps<Unverified, StandardMode>,
-    op: &DepositOp,
-    amount: Value,
-    notes: Vec<DepositNote>,
-) -> Events {
+/// A `Deposit` block event matching `op` inside `tx`, with its outputs.
+pub fn deposit_event(tx: &SignedOps<Unverified, StandardMode>, op: &DepositOp) -> Events {
     Events::from(ChainEvent::Tx(TxEvent::new(
         tx.hash(),
         op.op_id(),
         TxEventPayload::Deposit {
             channel_id: op.channel_id,
-            amount,
             metadata: op.metadata.clone(),
-            notes: notes.try_into().expect("bounded note count"),
+            outputs: op.outputs.clone(),
         },
     )))
 }

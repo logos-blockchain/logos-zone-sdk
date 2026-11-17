@@ -4,13 +4,7 @@ use std::{
 };
 
 use lb_core::{
-    mantle::{
-        Utxo, Value,
-        ops::channel::{
-            ChannelId, MsgId, deposit::DepositOp, inscribe::Inscription,
-            withdraw::ChannelWithdrawOp,
-        },
-    },
+    mantle::ops::channel::{ChannelId, MsgId, inscribe::Inscription},
     proofs::channel_multi_sig_proof::IndexedSignatures,
 };
 use lb_key_management_system_service::keys::{Ed25519Key, Ed25519PublicKey};
@@ -87,12 +81,6 @@ pub struct ZoneState {
     view_violations: HashMap<String, Vec<ZoneViewViolation>>,
     default_sequencer_alias: Option<String>,
     published_messages: HashMap<String, ZonePublishedMessage>,
-    submitted_deposits: HashMap<String, (DepositOp, Value)>,
-    /// The channel notes each deposit re-created, keyed by deposit alias — so a
-    /// later channel split transfer can spend them without waiting on the
-    /// indexer.
-    deposit_channel_notes: HashMap<String, Vec<Utxo>>,
-    submitted_withdraws: HashMap<String, ChannelWithdrawOp>,
     account_balances: HashMap<String, i64>,
     published_order: Vec<String>,
     saved_checkpoints: HashMap<String, SequencerCheckpoint>,
@@ -264,58 +252,6 @@ impl ZoneState {
             self.latest_checkpoints
                 .insert(sequencer_alias.to_owned(), checkpoint);
         }
-    }
-
-    pub fn remember_submitted_deposit(&mut self, alias: String, deposit: DepositOp, amount: Value) {
-        self.submitted_deposits.insert(alias, (deposit, amount));
-    }
-
-    pub fn remember_deposit_channel_notes(&mut self, alias: String, channel_notes: Vec<Utxo>) {
-        self.deposit_channel_notes.insert(alias, channel_notes);
-    }
-
-    pub fn resolve_deposit_channel_notes(
-        &self,
-        alias: impl AsRef<str>,
-    ) -> Result<&[Utxo], StepError> {
-        let alias = alias.as_ref();
-
-        self.deposit_channel_notes
-            .get(alias)
-            .map(Vec::as_slice)
-            .ok_or(StepError::LogicalError {
-                message: format!("Zone deposit channel notes for alias '{alias}' not found"),
-            })
-    }
-
-    pub fn resolve_submitted_deposit(
-        &self,
-        alias: impl AsRef<str>,
-    ) -> Result<&(DepositOp, Value), StepError> {
-        let alias = alias.as_ref();
-
-        self.submitted_deposits
-            .get(alias)
-            .ok_or(StepError::LogicalError {
-                message: format!("Zone deposit alias '{alias}' not found"),
-            })
-    }
-
-    pub fn remember_submitted_withdraw(&mut self, alias: String, withdraw: ChannelWithdrawOp) {
-        self.submitted_withdraws.insert(alias, withdraw);
-    }
-
-    pub fn resolve_submitted_withdraw(
-        &self,
-        alias: impl AsRef<str>,
-    ) -> Result<&ChannelWithdrawOp, StepError> {
-        let alias = alias.as_ref();
-
-        self.submitted_withdraws
-            .get(alias)
-            .ok_or(StepError::LogicalError {
-                message: format!("Zone withdraw alias '{alias}' not found"),
-            })
     }
 
     pub fn set_zone_account_balances(&mut self, balances: HashMap<String, i64>) {
@@ -679,12 +615,10 @@ impl ZoneState {
         let sequencers = self.sequencers.len();
         let running = self.runtimes.len();
         let published = self.published_messages.len();
-        let deposits = self.submitted_deposits.len();
-        let withdraws = self.submitted_withdraws.len();
         let checkpoints = self.saved_checkpoints.len();
 
         format!(
-            "node={node_name}, sequencers={sequencers}, running={running}, published={published}, deposits={deposits}, withdraws={withdraws}, checkpoints={checkpoints}"
+            "node={node_name}, sequencers={sequencers}, running={running}, published={published}, checkpoints={checkpoints}"
         )
     }
 
@@ -705,9 +639,6 @@ impl ZoneState {
 
         self.sequencers.clear();
         self.published_messages.clear();
-        self.submitted_deposits.clear();
-        self.deposit_channel_notes.clear();
-        self.submitted_withdraws.clear();
         self.account_balances.clear();
         self.published_order.clear();
         self.saved_checkpoints.clear();

@@ -66,6 +66,9 @@ mod actor;
 mod backfill;
 mod block_fetch;
 mod block_states;
+// TODO(private-utxo): successor derives program note ops from program steps
+// and selects the program notes a step consumes; the file is kept verbatim.
+#[cfg(any())]
 mod channel_wallet;
 mod client;
 mod handle;
@@ -98,10 +101,9 @@ pub use lb_key_management_system_service::keys::{Ed25519Key, UnverifiedEd25519Pu
 // an offline key holder with no sequencer or chain state.
 pub use tx_builder::sign_prepared;
 pub use types::{
-    AtomicWithdrawInfo, ChannelNote, ChannelTransferInfo, ChannelUpdate, ChannelUpdateTx,
-    ChannelWalletView, ConfigInfo, DepositInfo, Error, Event, FinalizedOp, FinalizedTx,
-    FundingConfig, InscriptionId, InscriptionInfo, PendingFunding, PendingTx, PreparedAtomicBundle,
+    ChannelUpdate, ChannelUpdateTx, ConfigInfo, DepositInfo, Error, Event, FinalizedOp,
+    FinalizedTx, FundingConfig, InscriptionId, InscriptionInfo, PendingFunding, PendingTx,
     PreparedChannelConfig, PublishResult, SequencerChannelView, SequencerCheckpoint,
-    SequencerConfig, TurnNotification, WithdrawArg, WithdrawInfo, WithdrawInputs,
+    SequencerConfig, TurnNotification, WithdrawInfo,
 };
 pub use zone_sequencer::ZoneSequencer;
