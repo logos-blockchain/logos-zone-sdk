@@ -1,11 +1,8 @@
-# The node repository runs its Cucumber suites only in the merge queue, on the
-# bladerunner runners, after review; pull requests only carry a lightweight
-# required check there. This repository has no branch protection yet, so the
-# lane runs in the merge queue and on demand, and the stable result check is
-# left out until the queue is configured.
+# Run end-to-end suites on branch pushes, including merges to master.
+# Merge-queue branches are excluded; manual runs remain available.
 on:
-  merge_group:
-    types: [ checks_requested ]
+  push:
+    branches-ignore: [ 'gh-readonly-queue/**' ]
   workflow_dispatch:
 
 name: Cucumber integration tests
@@ -51,8 +48,7 @@ jobs:
           echo "RUSTFLAGS=-C linker=rust-lld -L /run/current-system/sw/lib" >> "$GITHUB_ENV"
           echo "LIBRARY_PATH=/run/current-system/sw/lib" >> "$GITHUB_ENV"
 
-      # `github.sha` is the merge queue's temporary commit, i.e. the exact state
-      # that becomes `main` if this run passes.
+      # Test the commit that triggered this run.
       - name: Checkout repository
         uses: actions/checkout@85e6279cec87321a52edac9c87bce653a07cf6c2  # Version 4.2.2
         with:
