@@ -25,6 +25,7 @@ use lb_core::{
 use lb_key_management_system_service::keys::{Ed25519Key, UnverifiedEd25519PublicKey, ZkPublicKey};
 
 use super::tx_builder::sign_prepared;
+use crate::InscriptionSteps;
 
 const DEFAULT_RESUBMIT_INTERVAL: Duration = Duration::from_secs(30);
 const DEFAULT_RECONNECT_DELAY: Duration = Duration::from_secs(5);
@@ -365,6 +366,9 @@ pub enum Error {
     /// key. Not recoverable by retrying.
     #[error("signatures rejected: {0}")]
     InvalidMultiSig(String),
+    /// The step proofs do not fit the steps of the inscription.
+    #[error("step proofs rejected: {0}")]
+    InvalidStepProofs(String),
 }
 
 /// Events emitted by the sequencer.
@@ -566,6 +570,8 @@ pub struct InscriptionInfo {
     /// `None` for a channel-config entry, which is authorized by a threshold of
     /// keys rather than a single signer and carries no author.
     pub signer: Option<UnverifiedEd25519PublicKey>,
+    /// The steps of the inscription.
+    pub steps: InscriptionSteps,
 }
 
 /// A channel withdraw observed on chain: a holder taking its channel notes

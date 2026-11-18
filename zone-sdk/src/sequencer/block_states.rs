@@ -630,6 +630,7 @@ mod tests {
             this_msg: msg_id(this),
             payload: Inscription::empty(),
             signer: None,
+            steps: crate::InscriptionSteps::default(),
         }
     }
 

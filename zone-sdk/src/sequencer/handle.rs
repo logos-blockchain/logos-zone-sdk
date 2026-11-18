@@ -3,7 +3,13 @@ use lb_core::{
         SignedOps,
         channel::{SlotTimeframe, SlotTimeout},
         ledger::verification_mode::StandardMode,
-        ops::channel::{MsgId, VerifiedChannelKeys, inscribe::Inscription},
+        ops::{
+            StepProof,
+            channel::{
+                MsgId, VerifiedChannelKeys,
+                inscribe::{Inscription, InscriptionOp, MiniBlocks},
+            },
+        },
         transactions::{Ops, states::Unverified},
     },
     proofs::channel_multi_sig_proof::IndexedSignatures,
@@ -79,6 +85,27 @@ where
     /// [`ZoneSequencer::subscribe_ready`].
     pub async fn publish(&mut self, data: Inscription) -> Result<PublishReceipt, Error> {
         self.sequencer.do_publish(data).await
+    }
+
+    /// Build the inscription of `data` applying `mini_blocks` on the current
+    /// publish tip, without publishing it.
+    pub fn prepare_inscription(
+        &mut self,
+        data: Inscription,
+        mini_blocks: MiniBlocks,
+    ) -> Result<InscriptionOp, Error> {
+        self.sequencer.do_prepare_inscription(data, mini_blocks)
+    }
+
+    /// Enqueue a prepared inscription with one proof per step.
+    pub async fn submit_prepared_inscription(
+        &mut self,
+        op: InscriptionOp,
+        step_proofs: Vec<StepProof>,
+    ) -> Result<PublishReceipt, Error> {
+        self.sequencer
+            .do_submit_prepared_inscription(op, step_proofs)
+            .await
     }
 
     /// Build an [`Ops`] for the given ops and an inscription message,

@@ -8,7 +8,7 @@ use lb_core::{
         ledger::verification_mode::StandardMode,
         notes::{NoteCommitment, NoteNullifier},
         ops::{
-            ChannelInscribeProof, OpProof, OpProofRef, OpRef,
+            ChannelInscribeProof, OpProof, OpProofRef, OpRef, StepProof,
             channel::{
                 MsgId, UnverifiedChannelKeys, VerifiedChannelKeys,
                 config::ChannelConfigOp,
@@ -33,9 +33,12 @@ use super::{
     },
     *,
 };
-use crate::test_support::{
-    FORK_DIGEST, MockNode, StreamEnd, StreamScript, api_block, funding_config, header_id,
-    inscribe_op, live_event, scripts, single_key_channel_state, unverified_tx_with_ops,
+use crate::{
+    InscriptionSteps, inscribes,
+    test_support::{
+        FORK_DIGEST, MockNode, StreamEnd, StreamScript, api_block, funding_config, header_id,
+        inscribe_op, live_event, scripts, single_key_channel_state, unverified_tx_with_ops,
+    },
 };
 
 #[tokio::test]
@@ -174,6 +177,7 @@ async fn submit_signed_tx_refuses_a_parent_with_a_mined_child() {
                 this_msg: mined.id(),
                 payload: mined.inscription.clone(),
                 signer: Some(mined.signer),
+                steps: InscriptionSteps::default(),
             }),
         )],
         vec![],
@@ -478,6 +482,97 @@ async fn stale_publish_is_refunded() {
         Slot::from(8),
         "the checkpoint was republished after the re-fund"
     );
+}
+
+fn sample_steps() -> InscriptionSteps {
+    let op = InscriptionOp::sample_with_step();
+    InscriptionSteps {
+        proofs: ChannelInscribeProof::decode_context(&op)
+            .into_iter()
+            .map(StepProof::sample_for)
+            .collect(),
+        mini_blocks: op.mini_blocks,
+    }
+}
+
+#[tokio::test]
+async fn submit_prepared_inscription_carries_the_steps_and_their_proofs() {
+    let mut sequencer = ready_sequencer_with_channel(
+        Some(single_key_channel_state()),
+        Ed25519Key::from_bytes(&[0; 32]),
+    )
+    .await;
+    let steps = sample_steps();
+
+    let prepared = sequencer
+        .handle()
+        .prepare_inscription(
+            Inscription::new_unchecked(b"steps".to_vec()),
+            steps.mini_blocks.clone(),
+        )
+        .expect("a ready sequencer prepares an inscription");
+    let (result, checkpoint) = sequencer
+        .handle()
+        .submit_prepared_inscription(prepared.clone(), steps.proofs.to_vec())
+        .await
+        .expect("a prepared inscription with fitting proofs is published");
+
+    let info = result.tx.inscription();
+    assert_eq!(info.this_msg, prepared.id());
+    assert_eq!(info.steps, steps);
+    let (_, pending) = &checkpoint.pending_txs[0];
+    let (inscribe, pending_steps) = inscribes(pending)
+        .next()
+        .expect("the pending tx carries the inscription");
+    assert_eq!(inscribe, &prepared);
+    assert_eq!(pending_steps, steps);
+}
+
+#[tokio::test]
+async fn submit_prepared_inscription_refuses_misfit_proofs_and_a_moved_tip() {
+    let mut sequencer = ready_sequencer_with_channel(
+        Some(single_key_channel_state()),
+        Ed25519Key::from_bytes(&[0; 32]),
+    )
+    .await;
+    let steps = sample_steps();
+    let prepared = sequencer
+        .handle()
+        .prepare_inscription(
+            Inscription::new_unchecked(b"steps".to_vec()),
+            steps.mini_blocks.clone(),
+        )
+        .expect("a ready sequencer prepares an inscription");
+
+    let missing_one = steps.proofs[1..].to_vec();
+    assert!(matches!(
+        sequencer
+            .handle()
+            .submit_prepared_inscription(prepared.clone(), missing_one)
+            .await,
+        Err(Error::InvalidStepProofs(_))
+    ));
+    let wrong_kinds = steps.proofs.iter().rev().cloned().collect();
+    assert!(matches!(
+        sequencer
+            .handle()
+            .submit_prepared_inscription(prepared.clone(), wrong_kinds)
+            .await,
+        Err(Error::InvalidStepProofs(_))
+    ));
+
+    sequencer
+        .handle()
+        .publish(Inscription::new_unchecked(b"first".to_vec()))
+        .await
+        .expect("a plain publish takes the tip");
+    assert!(matches!(
+        sequencer
+            .handle()
+            .submit_prepared_inscription(prepared, steps.proofs.to_vec())
+            .await,
+        Err(Error::ChannelStateChanged(_))
+    ));
 }
 
 /// The pre-funding ops of a publish survive a checkpoint round trip
@@ -1946,6 +2041,7 @@ async fn update_variant_follows_orphaned() {
         this_msg: op.id(),
         payload: op.inscription.clone(),
         signer: Some(op.signer),
+        steps: InscriptionSteps::default(),
     };
     let result = |adopted: Vec<ChannelUpdateTx>,
                   orphaned: Vec<ChannelUpdateTx>,

@@ -10,7 +10,7 @@ use lb_core::{
         SignedOps,
         ledger::verification_mode::StandardMode,
         ops::{
-            OpRef,
+            OpRef, StepProof,
             channel::{ChannelId, MsgId, inscribe::Inscription},
         },
         traits::Hashable as _,
@@ -31,11 +31,19 @@ fn inscription_signer(
     })
 }
 
+fn inscription_steps(tx: &SignedOps<Unverified, StandardMode>) -> InscriptionSteps {
+    inscribes(tx)
+        .next()
+        .map(|(_, steps)| steps)
+        .unwrap_or_default()
+}
+
 use super::{
     block_fetch::{channel_configs, channel_inscriptions, is_pure_config},
     block_states::{BlockChannelTx, BlockStates, ChannelTxKind, SharedTx},
     types::{ChannelUpdateTx, DepositInfo, Error, InscriptionInfo, PendingFunding, PendingTx},
 };
+use crate::{InscriptionSteps, inscribes};
 
 /// Result of channel update detection — the linear block-level delta
 /// between two canonical chains.
@@ -186,6 +194,7 @@ type PendingFundingRecord = (Option<MantleTxBuilder>, Option<Slot>);
 pub struct RefundCandidate {
     pub tx_hash: TxHash,
     pub pre_fund: MantleTxBuilder,
+    pub step_proofs: Vec<StepProof>,
 }
 
 impl PendingInscription {
@@ -196,6 +205,7 @@ impl PendingInscription {
             this_msg: self.this_msg,
             payload: self.payload.clone(),
             signer: inscription_signer(&self.signed_tx),
+            steps: inscription_steps(&self.signed_tx),
         }
     }
 }
@@ -486,6 +496,7 @@ impl TxState {
                 p.pre_fund.clone().map(|pre_fund| RefundCandidate {
                     tx_hash: *hash,
                     pre_fund,
+                    step_proofs: inscription_steps(&p.signed_tx).proofs.to_vec(),
                 })
             })
             .collect();
@@ -2284,6 +2295,26 @@ mod tests {
         assert!(state.pending_inscription(&unfunded).is_none());
     }
 
+    #[test]
+    fn refund_candidate_keeps_the_step_proofs() {
+        let genesis = header_id(0);
+        let tip = header_id(1);
+        let mut state = TxState::new(genesis, MsgId::root());
+        state.process_block(tip, genesis, genesis, vec![], vec![], vec![]);
+        let op = InscriptionOp::sample_with_step();
+        let tx = crate::test_support::unverified_tx_with_ops(vec![Op::ChannelInscribe(op.clone())]);
+        let hash = tx.hash();
+        let proofs = inscription_steps(&tx).proofs.to_vec();
+        assert_eq!(proofs.len(), op.steps_len());
+        state
+            .submit_inscription(tx, op.parent, op.id(), op.inscription)
+            .unwrap();
+        state.stamp_funding(&hash, Slot::from(10), Some(MantleTxBuilder::new()));
+
+        let candidates = state.refund_candidates(tip, Slot::from(14), 3, usize::MAX);
+        assert_eq!(candidates[0].step_proofs, proofs);
+    }
+
     /// Of an expired backlog only what the node holds or is about to receive
     /// is rebuilt: posted entries, and the next `first_post_budget` unposted
     /// ones along the chain. The entries queued behind them keep their stale
@@ -2882,6 +2913,7 @@ mod tests {
             this_msg: mined_msg,
             payload: Inscription::new_unchecked(vec![1]),
             signer: Some(test_signer()),
+            steps: InscriptionSteps::default(),
         };
         state.process_block(
             b1,
@@ -2951,6 +2983,7 @@ mod tests {
             this_msg: msg,
             payload: Inscription::new_unchecked(vec![1]),
             signer: Some(test_signer()),
+            steps: InscriptionSteps::default(),
         };
         state.process_block(
             b1,
@@ -3157,6 +3190,7 @@ mod tests {
                 this_msg,
                 payload: Inscription::empty(),
                 signer: None,
+                steps: InscriptionSteps::default(),
             }),
         )
     }
@@ -3275,6 +3309,7 @@ mod tests {
             this_msg,
             payload: Inscription::empty(),
             signer: None,
+            steps: InscriptionSteps::default(),
         };
         let custom = stored(
             &tx,
@@ -3474,6 +3509,7 @@ mod tests {
             this_msg: msg_id(1),
             payload: Inscription::new_unchecked(vec![1]),
             signer: Some(test_signer()),
+            steps: InscriptionSteps::default(),
         };
         state.process_block(
             b1,
@@ -3675,6 +3711,7 @@ mod tests {
             this_msg: msg_id(1),
             payload: Inscription::new_unchecked(vec![1]),
             signer: Some(test_signer()),
+            steps: InscriptionSteps::default(),
         };
         state.process_block(
             b1,
@@ -3705,6 +3742,53 @@ mod tests {
         assert_eq!(state.channel_tip_at(b2), msg_id(1));
         assert!(state.pending_txs(b2).iter().any(|(h, _)| *h == p_hash));
         assert!(shed_lineage(&mut state, b2).is_empty());
+    }
+
+    /// A pending inscription with steps displaced by a competing one is
+    /// reported orphaned with its steps and their proofs.
+    #[test]
+    fn orphaned_pending_inscription_reports_its_steps() {
+        let genesis = header_id(0);
+        let block1 = header_id(1);
+        let block2 = header_id(2);
+        let op = InscriptionOp::sample_with_step();
+        let mut state = TxState::new(genesis, op.parent);
+        let tx = crate::test_support::unverified_tx_with_ops(vec![Op::ChannelInscribe(op.clone())]);
+        let steps = inscription_steps(&tx);
+        assert_eq!(steps.proofs.len(), op.steps_len());
+        state
+            .submit_inscription(tx, op.parent, op.id(), op.inscription.clone())
+            .unwrap();
+        state.process_block(block1, genesis, genesis, vec![], vec![], vec![]);
+        let old_lineage = state.channel_lineage(block1);
+
+        let rival = make_dummy_tx(99);
+        let rival_hash = rival.hash();
+        let rival_info = InscriptionInfo {
+            tx_hash: rival_hash,
+            parent_msg: op.parent,
+            this_msg: msg_id(20),
+            payload: Inscription::new_unchecked(vec![99]),
+            signer: Some(test_signer()),
+            steps: InscriptionSteps::default(),
+        };
+        state.process_block(
+            block2,
+            block1,
+            genesis,
+            vec![rival_hash],
+            vec![stored(&rival, ChannelTxKind::Inscription(rival_info))],
+            vec![],
+        );
+
+        let update = state
+            .detect_channel_update(&old_lineage, block2, &HashSet::new())
+            .expect("the rival displaces the pending inscription");
+        let orphaned = update.orphaned[0]
+            .inscription()
+            .expect("the orphaned tx is the inscription");
+        assert_eq!(orphaned.this_msg, op.id());
+        assert_eq!(orphaned.steps, steps);
     }
 
     #[test]
@@ -3741,6 +3825,7 @@ mod tests {
             this_msg: c1_msg,
             payload: Inscription::new_unchecked(vec![99]),
             signer: Some(test_signer()),
+            steps: InscriptionSteps::default(),
         };
         // Mirror the observed inscription into pending before the safe-set
         // build, as `handle_block_event` does — the pending set reflects the
@@ -3868,6 +3953,7 @@ mod tests {
             this_msg: c1_msg,
             payload: Inscription::new_unchecked(vec![99]),
             signer: Some(test_signer()),
+            steps: InscriptionSteps::default(),
         };
         state.process_block(
             block2,

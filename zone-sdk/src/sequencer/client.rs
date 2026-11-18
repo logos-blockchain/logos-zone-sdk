@@ -3,7 +3,13 @@ use lb_core::{
         SignedOps,
         channel::{SlotTimeframe, SlotTimeout},
         ledger::verification_mode::StandardMode,
-        ops::channel::{MsgId, VerifiedChannelKeys, inscribe::Inscription},
+        ops::{
+            StepProof,
+            channel::{
+                MsgId, VerifiedChannelKeys,
+                inscribe::{Inscription, InscriptionOp, MiniBlocks},
+            },
+        },
         transactions::{Ops, states::Unverified},
     },
     proofs::channel_multi_sig_proof::IndexedSignatures,
@@ -69,6 +75,37 @@ impl SequencerClient {
     pub async fn publish(&self, data: Inscription) -> Result<PublishReceipt, Error> {
         let (response_tx, response_rx) = oneshot::channel();
         self.send(ActorRequest::Publish { data, response_tx })?;
+        Self::recv(response_rx).await?
+    }
+
+    /// Async counterpart of [`super::SequencerHandle::prepare_inscription`].
+    pub async fn prepare_inscription(
+        &self,
+        data: Inscription,
+        mini_blocks: MiniBlocks,
+    ) -> Result<InscriptionOp, Error> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.send(ActorRequest::PrepareInscription {
+            data,
+            mini_blocks,
+            response_tx,
+        })?;
+        Self::recv(response_rx).await?
+    }
+
+    /// Async counterpart of
+    /// [`super::SequencerHandle::submit_prepared_inscription`].
+    pub async fn submit_prepared_inscription(
+        &self,
+        op: InscriptionOp,
+        step_proofs: Vec<StepProof>,
+    ) -> Result<PublishReceipt, Error> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.send(ActorRequest::SubmitPreparedInscription {
+            op: Box::new(op),
+            step_proofs,
+            response_tx,
+        })?;
         Self::recv(response_rx).await?
     }
 

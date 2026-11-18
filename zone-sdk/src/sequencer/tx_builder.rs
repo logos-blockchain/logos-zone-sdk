@@ -6,11 +6,11 @@ use lb_core::{
         channel::{SlotTimeframe, SlotTimeout},
         ledger::verification_mode::StandardMode,
         ops::{
-            ChannelInscribeProof, Op, OpProof, OpRef,
+            ChannelInscribeProof, Op, OpProof, OpRef, StepProof,
             channel::{
                 ChannelId, ChannelKeyIndex, MsgId, VerifiedChannelKeys,
                 config::ChannelConfigOp,
-                inscribe::{Inscription, InscriptionOp, MiniBlocks},
+                inscribe::{Inscription, InscriptionOp, MiniBlocks, Step},
             },
         },
         traits::{Hashable as _, MantleTx},
@@ -181,43 +181,62 @@ pub fn sign_prepared(
     ))
 }
 
-pub(super) async fn create_inscribe_tx<Node>(
-    node: &Node,
-    funding: &FundingConfig,
+pub(super) fn inscription_op(
     channel_id: ChannelId,
     signing_key: &Ed25519Key,
     inscription: Inscription,
     parent: MsgId,
-) -> Result<(SignedOps<Unverified, StandardMode>, MsgId, MantleTxBuilder), Error>
-where
-    Node: adapter::Node + Sync,
-{
-    let signer = signing_key.public_key().into_unverified();
-
-    let inscribe_op = InscriptionOp {
+    mini_blocks: MiniBlocks,
+) -> InscriptionOp {
+    InscriptionOp {
         channel_id,
         inscription,
         parent,
-        signer,
-        mini_blocks: MiniBlocks::default(),
-    };
-    let msg_id = inscribe_op.id();
+        signer: signing_key.public_key().into_unverified(),
+        mini_blocks,
+    }
+}
 
+/// Check that `step_proofs` holds one proof per step of `op`, of its kind.
+pub(super) fn check_step_proofs(
+    op: &InscriptionOp,
+    step_proofs: &[StepProof],
+) -> Result<(), Error> {
+    if op.steps_len() != step_proofs.len() {
+        return Err(Error::InvalidStepProofs(format!(
+            "{} proofs for {} steps",
+            step_proofs.len(),
+            op.steps_len()
+        )));
+    }
+    for (index, (step, proof)) in op.steps().zip(step_proofs).enumerate() {
+        let matches = match step {
+            Step::User(_) | Step::ProgramDeposit(_) => matches!(proof, StepProof::ZkTransfer(_)),
+            Step::Program(_) => matches!(proof, StepProof::ProgramStep(_)),
+        };
+        if !matches {
+            return Err(Error::InvalidStepProofs(format!(
+                "the proof of step {index} is not of the kind its step takes"
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub(super) async fn create_inscribe_tx<Node>(
+    node: &Node,
+    funding: &FundingConfig,
+    signing_key: &Ed25519Key,
+    inscribe_op: InscriptionOp,
+    step_proofs: Vec<StepProof>,
+) -> Result<(SignedOps<Unverified, StandardMode>, MantleTxBuilder), Error>
+where
+    Node: adapter::Node + Sync,
+{
     let (inscribe_tx, transfer_proof, pre_fund) =
         fund_ops(node, funding, vec![Op::ChannelInscribe(inscribe_op)]).await?;
-
-    let tx_hash = inscribe_tx.hash();
-    let signature = sign_tx(tx_hash, signing_key);
-    let ops_proofs = attach_transfer_proof(
-        &inscribe_tx,
-        [inscribe_proof(signature)].into(),
-        transfer_proof,
-    )?;
-
-    let signed_tx = SignedOps::from_parts(inscribe_tx, ops_proofs)
-        .unwrap_or_else(|error| panic!("Node returned an unprovable transaction: {error}"));
-
-    Ok((signed_tx, msg_id, pre_fund))
+    let signed_tx = sign_own_tx(inscribe_tx, transfer_proof, signing_key, step_proofs)?;
+    Ok((signed_tx, pre_fund))
 }
 
 /// Sign a funded inscription tx this sequencer built itself.
@@ -225,9 +244,14 @@ pub(super) fn sign_own_tx(
     tx: Ops,
     transfer_proof: Option<OpProof>,
     signing_key: &Ed25519Key,
+    step_proofs: Vec<StepProof>,
 ) -> Result<SignedOps<Unverified, StandardMode>, Error> {
     let own_sig = sign_tx(tx.hash(), signing_key);
-    let ops_proofs = attach_transfer_proof(&tx, [inscribe_proof(own_sig)].into(), transfer_proof)?;
+    let ops_proofs = attach_transfer_proof(
+        &tx,
+        [inscribe_proof(own_sig, step_proofs)].into(),
+        transfer_proof,
+    )?;
     SignedOps::from_parts(tx, ops_proofs)
         .map_err(|error| Error::Network(format!("failed to assemble signed tx: {error:?}")))
 }
@@ -359,13 +383,13 @@ pub(super) fn prepare_tx(
     inscription: Inscription,
     parent: MsgId,
 ) -> (Ops, MsgId, Ed25519Signature) {
-    let inscription_op = InscriptionOp {
+    let inscription_op = inscription_op(
         channel_id,
+        signing_key,
         inscription,
         parent,
-        signer: signing_key.public_key().into_unverified(),
-        mini_blocks: MiniBlocks::default(),
-    };
+        MiniBlocks::default(),
+    );
     let msg_id = inscription_op.id();
     // TODO: Return `Error` in case there's too many ops already.
     ops.try_push(Op::ChannelInscribe(inscription_op)).unwrap();
@@ -376,10 +400,11 @@ pub(super) fn prepare_tx(
     (ops, msg_id, inscription_sig)
 }
 
-/// The op proof of an inscription without user steps: the sequencer's
-/// signature over the tx hash.
-pub(super) const fn inscribe_proof(signature: Ed25519Signature) -> OpProof {
-    OpProof::ChannelInscribe(ChannelInscribeProof::without_steps(signature))
+pub(super) const fn inscribe_proof(
+    signature: Ed25519Signature,
+    step_proofs: Vec<StepProof>,
+) -> OpProof {
+    OpProof::ChannelInscribe(ChannelInscribeProof::new(signature, step_proofs))
 }
 
 pub(super) fn sign_tx(tx_hash: TxHash, signing_key: &Ed25519Key) -> Ed25519Signature {

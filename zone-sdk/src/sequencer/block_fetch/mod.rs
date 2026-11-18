@@ -29,8 +29,9 @@ use super::{
     },
 };
 use crate::{
-    adapter,
+    InscriptionSteps, adapter,
     adapter::{DepositEvents, DepositOpKey},
+    inscribes, ops_with_proofs,
 };
 
 /// Result of processing a block event.
@@ -428,21 +429,17 @@ pub fn channel_inscriptions(
     channel_id: ChannelId,
 ) -> Vec<InscriptionInfo> {
     let tx_hash = tx.op_refs().hash();
-    let mut entries: Vec<InscriptionInfo> = Vec::new();
-    for op in tx.op_refs() {
-        if let OpRef::ChannelInscribe(inscribe) = op
-            && inscribe.channel_id == channel_id
-        {
-            entries.push(InscriptionInfo {
-                tx_hash,
-                parent_msg: inscribe.parent,
-                this_msg: inscribe.id(),
-                payload: inscribe.inscription.clone(),
-                signer: Some(inscribe.signer),
-            });
-        }
-    }
-    entries
+    inscribes(tx)
+        .filter(|(inscribe, _)| inscribe.channel_id == channel_id)
+        .map(|(inscribe, steps)| InscriptionInfo {
+            tx_hash,
+            parent_msg: inscribe.parent,
+            this_msg: inscribe.id(),
+            payload: inscribe.inscription.clone(),
+            signer: Some(inscribe.signer),
+            steps,
+        })
+        .collect()
 }
 
 /// The message and config ids an update entry carries for `channel_id`.
@@ -484,6 +481,7 @@ pub fn channel_configs(
                     this_msg: config.id(),
                     payload: Inscription::new_unchecked(Vec::new()),
                     signer: None,
+                    steps: InscriptionSteps::default(),
                 })
             }
             _ => None,
@@ -687,7 +685,7 @@ fn extract_finalized_items(
     for tx in transactions {
         let tx_hash = tx.op_refs().hash();
         let mut ops: Vec<FinalizedOp> = Vec::new();
-        for op in tx.op_refs() {
+        for (op, proof) in ops_with_proofs(tx) {
             match op {
                 OpRef::ChannelInscribe(inscribe) if inscribe.channel_id == channel_id => {
                     // Chain order is asserted by `classify_channel_txs`,
@@ -699,6 +697,7 @@ fn extract_finalized_items(
                         this_msg: inscribe.id(),
                         payload: inscribe.inscription.clone(),
                         signer: Some(inscribe.signer),
+                        steps: InscriptionSteps::of(inscribe, proof),
                     };
                     ops.push(FinalizedOp::Inscription(info));
                 }
@@ -906,7 +905,7 @@ pub(super) fn classify_channel_tx(
     let mut transfers = 0usize;
     let mut foreign_ops = false;
 
-    for op in tx.op_refs() {
+    for (op, proof) in ops_with_proofs(tx) {
         match op {
             OpRef::ChannelInscribe(inscribe) if inscribe.channel_id == channel_id => {
                 if let Some(prev) = *block_tip {
@@ -925,6 +924,7 @@ pub(super) fn classify_channel_tx(
                     this_msg,
                     payload: inscribe.inscription.clone(),
                     signer: Some(inscribe.signer),
+                    steps: InscriptionSteps::of(inscribe, proof),
                 });
                 *block_tip = Some(this_msg);
             }
@@ -941,6 +941,7 @@ pub(super) fn classify_channel_tx(
                     this_msg: config.id(),
                     payload: Inscription::empty(),
                     signer: None,
+                    steps: InscriptionSteps::default(),
                 });
             }
             OpRef::Transfer(_) => transfers += 1,

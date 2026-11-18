@@ -478,7 +478,7 @@ where
     async fn refund_one(&mut self, candidate: RefundCandidate) -> Result<TxHash, Error> {
         let (tx, transfer_proof) =
             fund_builder(&self.node, &self.config.funding, candidate.pre_fund.clone()).await?;
-        let signed = sign_own_tx(tx, transfer_proof, &self.signing_key)?;
+        let signed = sign_own_tx(tx, transfer_proof, &self.signing_key, candidate.step_proofs)?;
         let funded_at = self.lib_slot;
         self.state
             .as_mut()

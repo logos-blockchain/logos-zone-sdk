@@ -15,7 +15,7 @@ use lb_core::{
         channel::ChannelState,
         ledger::verification_mode::{StandardMode, VerificationMode},
         notes::OutputCommitments,
-        ops::{OpId as _, OpRef, channel::ChannelId},
+        ops::{OpId as _, OpProofRef, OpRef, channel::ChannelId},
         traits::Hashable as _,
         transactions::{
             hash::TxHash,
@@ -31,7 +31,7 @@ use lb_log_targets::zone_sdk;
 use reqwest::Url;
 use tracing::error;
 
-use crate::{Deposit, Withdraw, ZoneBlock, ZoneMessage};
+use crate::{Deposit, InscriptionSteps, Withdraw, ZoneBlock, ZoneMessage, ops_with_proofs};
 
 const TARGET: &str = zone_sdk::ADAPTER;
 
@@ -355,9 +355,10 @@ fn block_to_messages<State: VerificationState, Mode: VerificationMode>(
         .into_iter()
         .flat_map(|tx| {
             let tx_hash = tx.hash();
-            tx.op_refs()
-                .into_iter()
-                .filter_map(move |op| op_to_zone_message(op, tx_hash, channel_id, deposit_events))
+            ops_with_proofs(&tx)
+                .filter_map(|(op, proof)| {
+                    op_to_zone_message(op, proof, tx_hash, channel_id, deposit_events)
+                })
                 .collect::<Vec<_>>()
         })
         .collect()
@@ -373,6 +374,7 @@ fn block_to_messages<State: VerificationState, Mode: VerificationMode>(
 /// [`fetch_block_deposit_events`] guarantees.
 fn op_to_zone_message(
     op: OpRef,
+    proof: OpProofRef,
     tx_hash: TxHash,
     channel_id: ChannelId,
     deposit_events: &DepositEvents,
@@ -383,6 +385,7 @@ fn op_to_zone_message(
                 id: inscribe.id(),
                 data: inscribe.inscription.clone(),
                 signer: inscribe.signer,
+                steps: InscriptionSteps::of(inscribe, proof),
             }))
         }
         OpRef::ChannelDeposit(deposit) if deposit.channel_id == channel_id => {
@@ -418,6 +421,7 @@ mod tests {
         notes::{NoteCommitment, NoteNullifier},
         ops::channel::{
             deposit::{DepositOp, Metadata},
+            inscribe::InscriptionOp,
             withdraw::ChannelWithdrawOp,
         },
     };
@@ -448,6 +452,21 @@ mod tests {
             outputs: [NoteCommitment(Fr::from(u64::from(input_seed) + 200))].into(),
             commitment_merkle_root: Fr::from(7u64),
         }
+    }
+
+    #[test]
+    fn block_to_messages_carries_the_steps_of_an_inscription() {
+        let op = InscriptionOp::sample_with_step();
+        let channel_id = op.channel_id;
+        let tx = unverified_tx_with_ops(vec![Op::ChannelInscribe(op.clone())]);
+
+        let messages = block_to_messages(vec![tx], channel_id, &HashMap::new());
+
+        let [ZoneMessage::Block(block)] = messages.as_slice() else {
+            panic!("one zone block expected, got {messages:?}");
+        };
+        assert_eq!(block.steps.mini_blocks, op.mini_blocks);
+        assert_eq!(block.steps.proofs.len(), op.steps_len());
     }
 
     /// Each indexer-facing message must carry the identity of the op it was
