@@ -40,8 +40,8 @@ use super::{
         zone_sequencing_state_row,
     },
     wait_for_channel_view, wait_for_exact_indexed_payload_count, wait_for_finalized_program,
-    wait_for_lib_advance, wait_for_program_via_sequencer, wait_for_transactions_finalized,
-    wait_for_turn_to_write,
+    wait_for_finalized_program_via_sequencer, wait_for_lib_advance, wait_for_observed_program,
+    wait_for_transactions_finalized, wait_for_turn_to_write,
 };
 use crate::cucumber::world::{ZoneSequencerStartup, ZoneWorld};
 
@@ -116,5 +116,6 @@ mod assertions;
 mod channel;
 mod lifecycle;
 mod policies;
+mod program;
 mod publishing;
 mod sequencing;

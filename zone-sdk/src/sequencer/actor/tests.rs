@@ -2776,3 +2776,142 @@ async fn own_registration_leaves_pending_when_its_block_finalizes() {
         }
     }
 }
+
+/// A pending registration and its funding record survive a checkpoint
+/// round trip, so a restored sequencer re-posts and can re-fund it.
+#[tokio::test]
+async fn registration_survives_a_checkpoint_round_trip() {
+    let channel_id = ChannelId::from([0; 32]);
+    let sequencer_key = Ed25519Key::from_bytes(&[0; 32]);
+    let config = SequencerConfig::new(funding_config());
+    let (mut node, _posted) = MockNode::with_posted_channel();
+    node.channel_state = Some(single_key_channel_state());
+    let mut sequencer = ZoneSequencer::init_with_config(
+        channel_id,
+        sequencer_key.clone(),
+        node,
+        config.clone(),
+        None,
+    );
+    loop {
+        if matches!(sequencer.next_event().await, Event::Ready) {
+            break;
+        }
+    }
+    let (info, checkpoint) = sequencer
+        .handle()
+        .register_program(sample_program_key())
+        .await
+        .expect("a valid key registers");
+
+    let json = serde_json::to_string(&checkpoint).expect("checkpoint serializes");
+    let restored_checkpoint: SequencerCheckpoint =
+        serde_json::from_str(&json).expect("checkpoint deserializes");
+    let restored = ZoneSequencer::init_with_config(
+        channel_id,
+        sequencer_key,
+        MockNode::default(),
+        config,
+        Some(restored_checkpoint),
+    );
+
+    let state = restored.state.as_ref().expect("restored state");
+    assert!(
+        state.tracked_tx_hashes().contains(&info.tx_hash),
+        "the registration is pending again"
+    );
+    let record = state
+        .funding_records()
+        .into_iter()
+        .find(|record| record.tx_hash == info.tx_hash)
+        .expect("its funding record is restored");
+    assert!(record.pre_fund.is_some(), "and can be re-funded");
+}
+
+/// A registration restored from a checkpoint is retired by cold-start
+/// backfill when finalized history carries it, and reported finalized.
+#[tokio::test]
+async fn restored_registration_is_retired_by_cold_start_backfill() {
+    let channel_id = ChannelId::from([0; 32]);
+    let sequencer_key = Ed25519Key::from_bytes(&[0; 32]);
+    let key = sample_program_key();
+    let (mut node, _posted) = MockNode::with_posted_channel();
+    node.channel_state = Some(single_key_channel_state());
+    let mut sequencer = ZoneSequencer::init(
+        channel_id,
+        sequencer_key.clone(),
+        node,
+        funding_config(),
+        None,
+    );
+    loop {
+        if matches!(sequencer.next_event().await, Event::Ready) {
+            break;
+        }
+    }
+    let (info, checkpoint) = sequencer
+        .handle()
+        .register_program(key.clone())
+        .await
+        .expect("a valid key registers");
+    drop(sequencer);
+
+    // While the sequencer was down the registration finalized in block 1.
+    let register_tx = unverified_tx_with_ops(vec![Op::ProgramRegister(ProgramRegisterOp {
+        verification_key: key,
+    })]);
+    assert_eq!(
+        register_tx.hash(),
+        info.tx_hash,
+        "the mock funds the bare op"
+    );
+    let b1 = api_block(1, 0, 5, vec![register_tx]);
+    let b2 = api_block(2, 1, 6, Vec::new());
+    let node = MockNode {
+        channel_state: Some(single_key_channel_state()),
+        lib: b1.header.id,
+        lib_slot: b1.header.slot,
+        tip: b1.header.id,
+        scripts: scripts(vec![StreamScript {
+            events: vec![live_event(&b2)],
+            then: StreamEnd::Hang,
+        }]),
+        immutable: vec![b1],
+        ..MockNode::default()
+    };
+    let mut restored = ZoneSequencer::init(
+        channel_id,
+        sequencer_key,
+        node,
+        funding_config(),
+        Some(checkpoint),
+    );
+
+    let mut finalized_programs = Vec::new();
+    loop {
+        match restored.next_event().await {
+            Event::Ready => break,
+            Event::BlocksProcessed { finalized, .. } => {
+                finalized_programs.extend(finalized.iter().flat_map(|tx| &tx.ops).filter_map(
+                    |op| match op {
+                        FinalizedOp::ProgramRegister(program) => Some(program.clone()),
+                        _ => None,
+                    },
+                ));
+            }
+            Event::TurnNotification { .. } => {}
+        }
+    }
+    assert_eq!(finalized_programs, vec![info]);
+    let checkpoint = restored
+        .subscribe_checkpoint()
+        .borrow()
+        .clone()
+        .expect("a checkpoint was published");
+    assert!(
+        checkpoint.pending_txs.is_empty(),
+        "backfill retired the restored registration: {:?}",
+        checkpoint.pending_txs
+    );
+    assert!(checkpoint.funding.is_empty());
+}

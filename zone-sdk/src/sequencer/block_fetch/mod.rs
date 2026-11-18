@@ -191,7 +191,7 @@ where
     };
 
     let tracked = state.map(TxState::tracked_tx_hashes).unwrap_or_default();
-    let our_txs = our_txs(&event.block.transactions, channel_id, &tracked);
+    let our_txs = block_our_txs(&event.block.transactions, channel_id, &tracked);
     let channel_txs = classify_channel_txs(&event.block.transactions, channel_id);
 
     // Deposit events for the live block: fetched here (the prepare phase) so
@@ -247,7 +247,7 @@ where
 
 /// The txs of a block the sequencer must see mined: those touching the
 /// channel tip and those it tracks itself, whatever their ops.
-fn our_txs(
+fn block_our_txs(
     transactions: &[SignedOps<Unverified, StandardMode>],
     channel_id: ChannelId,
     tracked: &HashSet<TxHash>,
@@ -559,7 +559,7 @@ where
 
     let mut prepared = Vec::with_capacity(blocks.len());
     for block in blocks {
-        let our_txs = our_txs(&block.transactions, channel_id, tracked);
+        let our_txs = block_our_txs(&block.transactions, channel_id, tracked);
         let channel_txs = classify_channel_txs(&block.transactions, channel_id);
 
         // Fetch + validate deposit events for this block BEFORE mutating
@@ -867,7 +867,7 @@ fn apply_backfilled_block(
     let block_id = block.header.id;
     let parent_id = block.header.parent_block;
 
-    let our_txs = our_txs(&block.transactions, channel_id, &state.tracked_tx_hashes());
+    let our_txs = block_our_txs(&block.transactions, channel_id, &state.tracked_tx_hashes());
     let channel_txs = classify_channel_txs(&block.transactions, channel_id);
 
     // Use current state lib to avoid premature finalization

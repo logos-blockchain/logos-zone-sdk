@@ -506,19 +506,21 @@ impl TxState {
                     step_proofs: inscription_steps(&p.signed_tx).proofs.to_vec(),
                 })
             })
-            .chain(self.pending_other.iter().filter_map(|(hash, entry)| {
-                let expired =
-                    !safe.contains(hash) && Self::expired(entry.funded_at, lib_slot, window);
-                expired
-                    .then(|| entry.pre_fund.clone())
-                    .flatten()
-                    .map(|pre_fund| RefundCandidate {
-                        tx_hash: *hash,
-                        pre_fund,
-                        // A registration takes no proof.
-                        step_proofs: Vec::new(),
+            .chain(
+                self.pending_other
+                    .iter()
+                    .filter(|(hash, entry)| {
+                        !safe.contains(hash) && Self::expired(entry.funded_at, lib_slot, window)
                     })
-            }))
+                    .filter_map(|(hash, entry)| {
+                        entry.pre_fund.clone().map(|pre_fund| RefundCandidate {
+                            tx_hash: *hash,
+                            pre_fund,
+                            // A registration takes no proof.
+                            step_proofs: Vec::new(),
+                        })
+                    }),
+            )
             .collect();
         candidates.sort_unstable_by_key(|c| c.tx_hash.0);
         candidates

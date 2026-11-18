@@ -15,6 +15,6 @@ use operations::{
     sequencer_config, sequencer_config_with_pending_submit_depth, start_balance_aware_policy,
     start_custom_republish_policy, start_republish_lineage_policy, start_sequencer_event_loop,
     start_sorted_conflict_policy, wait_for_channel_view, wait_for_exact_indexed_payload_count,
-    wait_for_finalized_program, wait_for_lib_advance, wait_for_program_via_sequencer,
-    wait_for_transactions_finalized, wait_for_turn_to_write,
+    wait_for_finalized_program, wait_for_finalized_program_via_sequencer, wait_for_lib_advance,
+    wait_for_observed_program, wait_for_transactions_finalized, wait_for_turn_to_write,
 };

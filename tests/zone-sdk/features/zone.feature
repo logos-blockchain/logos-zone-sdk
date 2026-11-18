@@ -692,11 +692,6 @@ Feature: Zone SDK
     Then the channel view contract holds for all zone sequencers
 
   @zone_ci
-  # A program registration is a funded op with no proof and no place in the
-  # channel lineage: the sequencer reports it observed when its block joins
-  # the canonical chain, then finalized, and the indexer replays it.
-  # The wallet funds a tx from at most four notes, so each top-up note must
-  # cover a whole fee on its own.
   Scenario: Sequencer registers a program and observes it land
     Given the genesis block has the following wallet resources:
       | account_index | token_count | token_amount |

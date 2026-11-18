@@ -1,19 +1,8 @@
 use super::{
-    Step, StepResult, ZoneWorld, prepare_zone_channel_config, register_zone_program,
-    save_zone_checkpoint, sign_prepared_zone_channel_config, single_column_table,
-    start_named_sequencer_with_startup, submit_prepared_zone_channel_config,
-    submit_zone_channel_config, when, zone_config_row,
+    Step, StepResult, ZoneWorld, prepare_zone_channel_config, save_zone_checkpoint,
+    sign_prepared_zone_channel_config, single_column_table, start_named_sequencer_with_startup,
+    submit_prepared_zone_channel_config, submit_zone_channel_config, when, zone_config_row,
 };
-
-#[when(expr = "sequencer {string} registers zone program {string}")]
-async fn step_register_zone_program(
-    world: &mut ZoneWorld,
-    step: &Step,
-    sequencer_alias: String,
-    program_alias: String,
-) -> StepResult {
-    register_zone_program(world, step, &sequencer_alias, program_alias).await
-}
 
 #[when(expr = "I save current checkpoint of sequencer {string} as {string}")]
 fn step_save_zone_checkpoint(

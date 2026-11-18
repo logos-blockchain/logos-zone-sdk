@@ -631,7 +631,9 @@ pub struct ProgramRegisterInfo {
 /// by `(tx_hash, op_id)` and a registration by `program_id`.
 #[derive(Debug, Clone)]
 pub enum ObservedOp {
+    /// A holder's deposit into the channel.
     Deposit(DepositInfo),
+    /// A program registration, by anyone.
     ProgramRegister(ProgramRegisterInfo),
 }
 

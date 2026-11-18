@@ -474,13 +474,42 @@ pub async fn wait_for_finalized_program(
 }
 
 /// Waits until the sequencer's event stream reports the registration of
-/// `program_id`: observed on the canonical branch, or finalized when
-/// `finalized` is set. Drains the events channel as it goes.
-pub async fn wait_for_program_via_sequencer(
+/// `program_id` observed on the canonical branch.
+pub async fn wait_for_observed_program(
     events: &mut tokio::sync::broadcast::Receiver<Event>,
     program_id: ProgramId,
-    finalized: bool,
     duration: Duration,
+) -> Result<(), ZoneTestError> {
+    wait_for_block_event(events, duration, |observed, _| {
+        observed
+            .iter()
+            .any(|op| matches!(op, ObservedOp::ProgramRegister(p) if p.program_id == program_id))
+    })
+    .await
+}
+
+/// Waits until the sequencer's event stream reports the registration of
+/// `program_id` finalized.
+pub async fn wait_for_finalized_program_via_sequencer(
+    events: &mut tokio::sync::broadcast::Receiver<Event>,
+    program_id: ProgramId,
+    duration: Duration,
+) -> Result<(), ZoneTestError> {
+    wait_for_block_event(events, duration, |_, finalized| {
+        finalized
+            .iter()
+            .flat_map(|tx| tx.ops.iter())
+            .any(|op| matches!(op, FinalizedOp::ProgramRegister(p) if p.program_id == program_id))
+    })
+    .await
+}
+
+/// Drains `events` until a `BlocksProcessed` satisfies `found` on its
+/// observed and finalized ops.
+async fn wait_for_block_event(
+    events: &mut tokio::sync::broadcast::Receiver<Event>,
+    duration: Duration,
+    mut found: impl FnMut(&[ObservedOp], &[FinalizedTx]) -> bool,
 ) -> Result<(), ZoneTestError> {
     timeout(duration, async {
         loop {
@@ -494,25 +523,13 @@ pub async fn wait_for_program_via_sequencer(
                     return Err(ZoneTestError::SequencerStopped);
                 }
             };
-            let Event::BlocksProcessed {
+            if let Event::BlocksProcessed {
                 observed,
-                finalized: finalized_txs,
+                finalized,
                 ..
             } = event
-            else {
-                continue;
-            };
-            let seen = if finalized {
-                finalized_txs
-                    .iter()
-                    .flat_map(|tx| tx.ops.iter())
-                    .any(|op| matches!(op, FinalizedOp::ProgramRegister(p) if p.program_id == program_id))
-            } else {
-                observed
-                    .iter()
-                    .any(|op| matches!(op, ObservedOp::ProgramRegister(p) if p.program_id == program_id))
-            };
-            if seen {
+                && found(&observed, &finalized)
+            {
                 return Ok(());
             }
         }

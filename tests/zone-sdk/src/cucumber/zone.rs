@@ -87,7 +87,6 @@ pub struct ZoneState {
     latest_checkpoints: HashMap<String, SequencerCheckpoint>,
     prepared_configs: HashMap<String, PreparedChannelConfig>,
     prepared_config_signatures: HashMap<String, IndexedSignatures>,
-    /// Program registrations a sequencer submitted, by alias.
     programs: HashMap<String, ProgramRegisterInfo>,
     sequencer_startups: HashMap<String, ZoneSequencerStartup>,
     sorted_total_payloads: Option<usize>,
