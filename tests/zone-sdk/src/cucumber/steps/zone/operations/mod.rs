@@ -20,6 +20,7 @@ use lb_core::mantle::{
         ChannelId, MsgId,
         inscribe::{Inscription, InscriptionOp},
     },
+    programs::ProgramVerificationKey,
     traits::Hashable as _,
     transactions::{builder::MantleTxBuilder, states::Unverified},
 };
@@ -40,8 +41,8 @@ use tracing::warn;
 
 use super::runner::{
     self, ChannelUpdate, ChannelUpdateTx, Event, FinalizedOp, FinalizedTx, FundingConfig,
-    InscriptionId, InscriptionInfo, ObservedOp, PublishResult, SequencerChannelView,
-    SequencerCheckpoint, SequencerClient, SequencerConfig, TurnNotification,
+    InscriptionId, InscriptionInfo, ObservedOp, ProgramRegisterInfo, PublishResult,
+    SequencerChannelView, SequencerCheckpoint, SequencerClient, SequencerConfig, TurnNotification,
 };
 
 /// Inscriptions in the just-finalized txs — the permanent, settled part of the
@@ -188,10 +189,11 @@ pub(super) use custom_policy::{CustomRepublishDeps, start_custom_republish_polic
 pub(super) use observation::{
     balance_update_payload, collect_indexed_messages, collect_indexed_messages_exactly_once,
     ensure_zone_message_included, ensure_zone_transactions_included, keygen, parse_balance_payload,
-    publish_message_with_retry, replay_finalized_history, replayed_inscription_payloads,
-    sequencer_config, sequencer_config_with_pending_submit_depth, wait_for_channel_view,
-    wait_for_exact_indexed_payload_count, wait_for_finalized_program, wait_for_lib_advance,
-    wait_for_program_via_sequencer, wait_for_transactions_finalized, wait_for_turn_to_write,
+    publish_message_with_retry, register_program_with_retry, replay_finalized_history,
+    replayed_inscription_payloads, sequencer_config, sequencer_config_with_pending_submit_depth,
+    wait_for_channel_view, wait_for_exact_indexed_payload_count, wait_for_finalized_program,
+    wait_for_lib_advance, wait_for_program_via_sequencer, wait_for_transactions_finalized,
+    wait_for_turn_to_write,
 };
 pub(super) use policies::{
     start_balance_aware_policy, start_republish_lineage_policy, start_sequencer_event_loop,

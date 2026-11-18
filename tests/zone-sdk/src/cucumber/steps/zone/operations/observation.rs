@@ -428,6 +428,27 @@ pub async fn wait_for_lib_advance(
     .map_err(|_| ZoneTestError::LibAdvanceTimeout)?
 }
 
+/// Registers `verification_key` through the sequencer, retrying while the
+/// node wallet has not caught up with the notes a previous tx left it.
+pub async fn register_program_with_retry(
+    client: &SequencerClient,
+    verification_key: &ProgramVerificationKey,
+    deadline: PublishDeadline,
+) -> Result<(ProgramRegisterInfo, SequencerCheckpoint), ZoneTestError> {
+    loop {
+        if deadline.is_expired() {
+            return Err(ZoneTestError::PublishTimeout);
+        }
+        match client.register_program(verification_key.clone()).await {
+            Ok(registered) => return Ok(registered),
+            Err(error) => {
+                warn!(error = %error, "Zone sequencer register_program failed, retrying");
+                sleep(Duration::from_millis(500)).await;
+            }
+        }
+    }
+}
+
 /// Waits until the finalized channel history replayed from the indexer
 /// carries the registration of `program_id`.
 pub async fn wait_for_finalized_program(

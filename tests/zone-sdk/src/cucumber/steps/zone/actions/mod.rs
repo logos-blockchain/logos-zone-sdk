@@ -35,7 +35,7 @@ use super::{
     CustomRepublishDeps, DiscardedPayloads, PolicyRuntime, PublishDeadline, ZoneAccountBalances,
     ensure_zone_transactions_included,
     errors::{log_step_error, zone_step_error},
-    keygen, publish_message_with_retry,
+    keygen, publish_message_with_retry, register_program_with_retry,
     runner::{Event, PublishResult, SequencerCheckpoint, SequencerClient, ViewViolation},
     sequencer_config, sequencer_config_with_pending_submit_depth, start_balance_aware_policy,
     start_custom_republish_policy, start_republish_lineage_policy, start_sequencer_event_loop,

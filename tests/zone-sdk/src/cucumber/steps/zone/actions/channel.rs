@@ -1,9 +1,9 @@
 use lb_core::mantle::ops::program::ProgramRegisterOp;
 
 use super::{
-    Duration, Ed25519Key, Inscription, PublishResult, SequencerCheckpoint, Step, StepError,
-    StepResult, TxHash, VerifiedChannelKeys, ZONE_CHANNEL_CONFIG_THRESHOLD, ZoneWorld,
-    log_step_error, timeout,
+    Duration, Ed25519Key, Inscription, PublishDeadline, PublishResult, SequencerCheckpoint, Step,
+    StepError, StepResult, TxHash, VerifiedChannelKeys, ZONE_CHANNEL_CONFIG_THRESHOLD, ZoneWorld,
+    log_step_error, register_program_with_retry, timeout,
 };
 
 /// Registers the node's sample program key through the sequencer and
@@ -16,12 +16,15 @@ pub(in super::super) async fn register_zone_program(
     program_alias: String,
 ) -> StepResult {
     let client = log_step_error(step, world.zone.sequencer_client(sequencer_alias))?;
-    let (info, checkpoint) = client
-        .register_program(ProgramRegisterOp::sample().verification_key)
-        .await
-        .map_err(|error| StepError::LogicalError {
-            message: format!("Zone register_program failed: {error}"),
-        })?;
+    let (info, checkpoint) = register_program_with_retry(
+        client,
+        &ProgramRegisterOp::sample().verification_key,
+        PublishDeadline::from_now(Duration::from_secs(120)),
+    )
+    .await
+    .map_err(|error| StepError::LogicalError {
+        message: format!("Zone register_program failed: {error}"),
+    })?;
 
     world
         .zone

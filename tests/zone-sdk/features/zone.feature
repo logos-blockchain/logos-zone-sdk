@@ -695,6 +695,8 @@ Feature: Zone SDK
   # A program registration is a funded op with no proof and no place in the
   # channel lineage: the sequencer reports it observed when its block joins
   # the canonical chain, then finalized, and the indexer replays it.
+  # The wallet funds a tx from at most four notes, so each top-up note must
+  # cover a whole fee on its own.
   Scenario: Sequencer registers a program and observes it land
     Given the genesis block has the following wallet resources:
       | account_index | token_count | token_amount |
@@ -704,7 +706,7 @@ Feature: Zone SDK
       | node_name | account_index | wallet_name | connected_to | sequencers |
       | NODE_1    | 1             | WALLET_1A   |              | SEQ_A      |
     When node "NODE_1" is at height 1 in 120 seconds
-    And wallet "WALLET_1A" sends 30 notes of 1000 LGO to node "NODE_1" funding wallet as "FUNDING_TOPUP"
+    And wallet "WALLET_1A" sends 4 notes of 10000 LGO to node "NODE_1" funding wallet as "FUNDING_TOPUP"
     And transaction "FUNDING_TOPUP" is included on node "NODE_1" in 180 seconds
     And I start zone sequencer "SEQ_A" with indexer
     And sequencer "SEQ_A" publishes the following zone messages:
