@@ -15,7 +15,9 @@ use lb_core::{
                 deposit::{DepositOp, Metadata},
                 inscribe::{Inscription, InscriptionOp, MiniBlocks},
             },
+            program::ProgramRegisterOp,
         },
+        programs::{ProgramVerificationKey, derive_program_id},
         traits::Hashable as _,
         transactions::{OpProofs, Ops, TxList, states::Unverified},
     },
@@ -28,7 +30,7 @@ use super::{
     super::{
         block_fetch::ViewBefore,
         block_states::{BlockChannelTx, ChannelTxKind},
-        types::{ConfigInfo, FinalizedOp, InscriptionInfo, SequencerConfig},
+        types::{ConfigInfo, FinalizedOp, InscriptionInfo, ProgramRegisterInfo, SequencerConfig},
         zone_sequencer::track_pending_tx,
     },
     *,
@@ -37,7 +39,8 @@ use crate::{
     InscriptionSteps, inscribes,
     test_support::{
         FORK_DIGEST, MockNode, StreamEnd, StreamScript, api_block, funding_config, header_id,
-        inscribe_op, live_event, scripts, single_key_channel_state, unverified_tx_with_ops,
+        inscribe_op, live_event, observed_deposit_ids, scripts, single_key_channel_state,
+        unverified_tx_with_ops,
     },
 };
 
@@ -348,13 +351,14 @@ async fn gap_deposits_surface_after_a_failed_backfill_and_a_fork_switch() {
             .expect("B3 lands after the reconnect and the fork switch");
         let Event::BlocksProcessed {
             channel_update,
-            deposits,
+            observed,
             ..
         } = event
         else {
             continue;
         };
-        if deposits.iter().any(|d| d.op_id == d2) {
+        let deposits = observed_deposit_ids(&observed);
+        if deposits.contains(&d2) {
             break (channel_update, deposits);
         }
         before.push(channel_update);
@@ -367,9 +371,8 @@ async fn gap_deposits_surface_after_a_failed_backfill_and_a_fork_switch() {
     );
     let switched_to_fork = before.last().expect("C was processed before B3");
     assert_eq!(msg_ids(switched_to_fork.adopted()), vec![z_id]);
-    let observed: Vec<_> = deposits.iter().map(|d| d.op_id).collect();
     assert_eq!(
-        observed,
+        deposits,
         vec![d2, d3],
         "gap deposit first, then the live block's"
     );
@@ -2053,7 +2056,7 @@ async fn update_variant_follows_orphaned() {
             new_channel_tip: MsgId::root(),
         }),
         view_before,
-        deposits: Vec::new(),
+        observed: Vec::new(),
     };
     let hashes =
         |txs: &[ChannelUpdateTx]| txs.iter().map(ChannelUpdateTx::tx_hash).collect::<Vec<_>>();
@@ -2249,7 +2252,7 @@ async fn off_suffix_pending_entry_is_shed_without_a_lineage_change() {
         finalized_items: Vec::new(),
         channel_update: None,
         view_before: ViewBefore::new(&[], HashSet::new()),
-        deposits: Vec::new(),
+        observed: Vec::new(),
     });
     let ChannelUpdate::Conflict { orphaned, .. } = update else {
         panic!("the stranded entry must be reported orphaned, got {update:?}")
@@ -2526,4 +2529,250 @@ async fn a_second_config_on_a_pending_config_position_is_refused() {
         matches!(second, Err(Error::ChannelStateChanged(_))),
         "the position is taken while the first config pends: {second:?}"
     );
+}
+
+fn sample_program_key() -> ProgramVerificationKey {
+    ProgramRegisterOp::sample().verification_key
+}
+
+/// A registration is one funded `ProgramRegister` op with no proof, tracked
+/// like an own tx: in the checkpoint's pending set with a funding record
+/// that can rebuild it.
+#[tokio::test]
+async fn register_program_submits_an_unproven_op_and_tracks_it() {
+    let mut sequencer = ready_sequencer_with_channel(
+        Some(single_key_channel_state()),
+        Ed25519Key::from_bytes(&[0; 32]),
+    )
+    .await;
+    let key = sample_program_key();
+
+    let (info, checkpoint) = sequencer
+        .handle()
+        .register_program(key.clone())
+        .await
+        .expect("a valid key registers");
+
+    assert_eq!(info.program_id, derive_program_id(&key));
+    assert_eq!(info.verification_key, key);
+    let (hash, tx) = checkpoint
+        .pending_txs
+        .iter()
+        .find(|(hash, _)| *hash == info.tx_hash)
+        .expect("the registration is pending");
+    let ops: Vec<_> = tx.op_refs_iter().collect();
+    let [op] = ops.as_slice() else {
+        panic!("one op before funding, got {ops:?}");
+    };
+    assert!(matches!(op, OpRef::ProgramRegister(register) if register.verification_key == key));
+    assert!(matches!(
+        tx.first().expect("one op").proof(),
+        OpProofRef::None(_)
+    ));
+    let funding = checkpoint
+        .funding
+        .iter()
+        .find(|record| record.tx_hash == *hash)
+        .expect("the registration has a funding record");
+    assert!(
+        funding.pre_fund.is_some(),
+        "a registration can be re-funded"
+    );
+}
+
+/// A key the ledger would reject is refused before anything is funded.
+#[tokio::test]
+async fn register_program_refuses_a_key_off_the_curve() {
+    let mut sequencer = ready_sequencer_with_channel(
+        Some(single_key_channel_state()),
+        Ed25519Key::from_bytes(&[0; 32]),
+    )
+    .await;
+    // Canonical bytes, yet no point has x = 0.
+    let mut bytes = sample_program_key().to_bytes();
+    bytes[..32].fill(0);
+    let off_curve = ProgramVerificationKey::try_from_bytes(&bytes).expect("decodes");
+
+    let error = sequencer
+        .handle()
+        .register_program(off_curve)
+        .await
+        .expect_err("an off-curve key is refused");
+    assert!(matches!(error, Error::InvalidProgramKey(_)), "{error:?}");
+    assert!(
+        sequencer
+            .subscribe_checkpoint()
+            .borrow()
+            .as_ref()
+            .is_none_or(|checkpoint| checkpoint.pending_txs.is_empty()),
+        "nothing was submitted"
+    );
+}
+
+/// Anyone's registration is reported when its block joins the canonical
+/// chain, and again when it finalizes.
+#[tokio::test]
+async fn program_registration_is_observed_then_finalized() {
+    let channel_id = ChannelId::from([7; 32]);
+    let key = sample_program_key();
+    let register_tx = unverified_tx_with_ops(vec![Op::ProgramRegister(ProgramRegisterOp {
+        verification_key: key.clone(),
+    })]);
+    let b1 = api_block(1, 0, 1, vec![register_tx.clone()]);
+    let b2 = api_block(2, 1, 2, Vec::new());
+    let finalizing = ProcessedBlockEvent {
+        block: b2.clone(),
+        tip: b2.header.id,
+        tip_slot: b2.header.slot,
+        lib: b1.header.id,
+        lib_slot: b1.header.slot,
+    };
+    let node = MockNode {
+        immutable: vec![b1.clone()],
+        scripts: scripts(vec![StreamScript {
+            events: vec![live_event(&b1), finalizing],
+            then: StreamEnd::Hang,
+        }]),
+        ..MockNode::default()
+    };
+    let mut sequencer = ZoneSequencer::init(
+        channel_id,
+        Ed25519Key::from_bytes(&[0; 32]),
+        node,
+        funding_config(),
+        None,
+    );
+
+    let mut observed_programs = Vec::new();
+    let mut finalized_programs = Vec::new();
+    while finalized_programs.is_empty() {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), sequencer.next_event())
+            .await
+            .expect("both blocks are served");
+        if let Event::BlocksProcessed {
+            observed,
+            finalized,
+            ..
+        } = event
+        {
+            observed_programs.extend(observed.into_iter().filter_map(|op| match op {
+                ObservedOp::ProgramRegister(program) => Some(program),
+                ObservedOp::Deposit(_) => None,
+            }));
+            finalized_programs.extend(finalized.iter().flat_map(|tx| &tx.ops).filter_map(|op| {
+                match op {
+                    FinalizedOp::ProgramRegister(program) => Some(program.clone()),
+                    _ => None,
+                }
+            }));
+        }
+    }
+
+    let expected = ProgramRegisterInfo {
+        tx_hash: register_tx.hash(),
+        program_id: derive_program_id(&key),
+        verification_key: key,
+    };
+    assert_eq!(observed_programs, vec![expected.clone()]);
+    assert_eq!(finalized_programs, vec![expected]);
+}
+
+/// An own registration carries no channel op, so only the tracked hash
+/// marks it mined: once its block finalizes it leaves the pending set.
+#[tokio::test]
+async fn own_registration_leaves_pending_when_its_block_finalizes() {
+    let channel_id = ChannelId::from([0; 32]);
+    let key = sample_program_key();
+    // The mock funds without a fee transfer, so the tx the sequencer builds
+    // is the bare op under the fixture fork digest.
+    let register_tx = unverified_tx_with_ops(vec![Op::ProgramRegister(ProgramRegisterOp {
+        verification_key: key.clone(),
+    })]);
+    let b1 = api_block(1, 0, 1, Vec::new());
+    let b2 = api_block(2, 1, 2, vec![register_tx.clone()]);
+    let b3 = api_block(3, 2, 3, Vec::new());
+    let finalizing = ProcessedBlockEvent {
+        block: b3.clone(),
+        tip: b3.header.id,
+        tip_slot: b3.header.slot,
+        lib: b2.header.id,
+        lib_slot: b2.header.slot,
+    };
+    let (up_tx, up_rx) = watch::channel(true);
+    let node = MockNode {
+        channel_state: Some(single_key_channel_state()),
+        up: Some(up_rx),
+        immutable: vec![b2.clone()],
+        scripts: scripts(vec![
+            StreamScript {
+                events: vec![live_event(&b1)],
+                then: StreamEnd::Hang,
+            },
+            StreamScript {
+                events: vec![live_event(&b2), finalizing],
+                then: StreamEnd::Hang,
+            },
+        ]),
+        ..MockNode::default()
+    };
+    let config = SequencerConfig {
+        reconnect_delay: std::time::Duration::from_millis(20),
+        ..SequencerConfig::new(funding_config())
+    };
+    let mut sequencer = ZoneSequencer::init_with_config(
+        channel_id,
+        Ed25519Key::from_bytes(&[0; 32]),
+        node,
+        config,
+        None,
+    );
+    loop {
+        if matches!(sequencer.next_event().await, Event::Ready) {
+            break;
+        }
+    }
+
+    let (info, checkpoint) = sequencer
+        .handle()
+        .register_program(key)
+        .await
+        .expect("a valid key registers");
+    assert_eq!(
+        info.tx_hash,
+        register_tx.hash(),
+        "the mock funds the bare op"
+    );
+    assert_eq!(checkpoint.pending_txs.len(), 1);
+
+    // Drop the connection, then come back on the stream that mines and
+    // finalizes the registration.
+    up_tx.send(false).unwrap();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let reconnect = tokio::time::sleep(std::time::Duration::from_millis(100));
+    tokio::pin!(reconnect);
+    loop {
+        let event = tokio::select! {
+            event = sequencer.next_event() => event,
+            () = &mut reconnect => {
+                up_tx.send(true).unwrap();
+                continue;
+            }
+            () = tokio::time::sleep_until(deadline) => panic!("the registration finalizes"),
+        };
+        if let Event::BlocksProcessed {
+            checkpoint,
+            finalized,
+            ..
+        } = event
+            && finalized.iter().any(|tx| tx.tx_hash == info.tx_hash)
+        {
+            assert!(
+                checkpoint.pending_txs.is_empty(),
+                "the finalized registration is no longer pending: {:?}",
+                checkpoint.pending_txs
+            );
+            assert!(checkpoint.funding.is_empty());
+            break;
+        }
+    }
 }

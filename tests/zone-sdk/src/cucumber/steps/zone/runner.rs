@@ -21,9 +21,9 @@ use std::{
 use lb_core::mantle::{ops::channel::MsgId, transactions::hash::TxHash};
 pub use lb_zone_sdk::sequencer::{
     ChannelUpdate, ChannelUpdateTx, DepositInfo, Error, Event, FinalizedOp, FinalizedTx,
-    FundingConfig, IndexedSignature, InscriptionId, InscriptionInfo, PendingTx,
-    PreparedChannelConfig, PublishResult, SequencerChannelView, SequencerCheckpoint,
-    SequencerClient, SequencerConfig, TurnNotification, WithdrawInfo,
+    FundingConfig, IndexedSignature, InscriptionId, InscriptionInfo, ObservedOp, PendingTx,
+    PreparedChannelConfig, ProgramRegisterInfo, PublishResult, SequencerChannelView,
+    SequencerCheckpoint, SequencerClient, SequencerConfig, TurnNotification, WithdrawInfo,
 };
 use lb_zone_sdk::{adapter, sequencer::ZoneSequencer};
 use tokio::{

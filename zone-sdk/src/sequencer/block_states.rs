@@ -19,7 +19,7 @@ use lb_core::{
 };
 use rpds::{HashTrieSetSync, ListSync};
 
-use super::types::{DepositInfo, InscriptionInfo};
+use super::types::{InscriptionInfo, ObservedOp};
 
 // TODO(private-utxo): successor is the program note set, keyed by commitment,
 // holding each program note's opening and nullifier, layered per branch over
@@ -47,8 +47,9 @@ struct BlockState {
     safe_set: SafeSet,
     /// The channel lineage on the branch through this block.
     lineage: Lineage,
-    /// Channel deposits mined in this block, in op order.
-    deposits: Vec<DepositInfo>,
+    /// Channel deposits and program registrations mined in this block, in
+    /// op order.
+    observed: Vec<ObservedOp>,
 }
 
 /// A message-lineage position: an entry's id and its lineage-parent.
@@ -295,7 +296,7 @@ impl BlockStates {
         parent_id: HeaderId,
         our_txs: impl IntoIterator<Item = TxHash>,
         channel_txs: Vec<BlockChannelTx>,
-        deposits: Vec<DepositInfo>,
+        observed: Vec<ObservedOp>,
     ) {
         // Store parent relationship for pruning
         self.parent_map.insert(block_id, parent_id);
@@ -322,7 +323,7 @@ impl BlockStates {
             BlockState {
                 safe_set,
                 lineage,
-                deposits,
+                observed,
             },
         );
 
@@ -496,15 +497,15 @@ impl BlockStates {
         blocks
     }
 
-    /// The deposits of the blocks above LIB that `tip`'s branch holds and
-    /// `old_tip`'s did not, oldest block first: what turned canonical with
-    /// this tip move. A branch that wins the tip back reports its deposits
+    /// The observed ops of the blocks above LIB that `tip`'s branch holds
+    /// and `old_tip`'s did not, oldest block first: what turned canonical
+    /// with this tip move. A branch that wins the tip back reports its ops
     /// again, as `adopted` does its inscriptions.
-    pub fn deposits_newly_canonical(
+    pub fn observed_newly_canonical(
         &self,
         old_tip: Option<HeaderId>,
         tip: HeaderId,
-    ) -> Vec<DepositInfo> {
+    ) -> Vec<ObservedOp> {
         let old: HashSet<HeaderId> = old_tip
             .map(|old| self.branch_blocks_above_lib(old))
             .unwrap_or_default()
@@ -514,7 +515,7 @@ impl BlockStates {
             .into_iter()
             .filter(|block| !old.contains(block))
             .filter_map(|block| self.block_states.get(&block))
-            .flat_map(|state| state.deposits.iter().cloned())
+            .flat_map(|state| state.observed.iter().cloned())
             .collect()
     }
 

@@ -9,7 +9,7 @@ use lb_core::{
         channel::ChannelState,
         gas::GasCost,
         ledger::verification_mode::StandardMode,
-        notes::OutputCommitments,
+        notes::{OutputCommitments, ProgramId},
         ops::{
             Op, OpProof,
             channel::{
@@ -17,6 +17,7 @@ use lb_core::{
                 inscribe::Inscription, withdraw::ChannelWithdrawOp,
             },
         },
+        programs::ProgramVerificationKey,
         traits::Hashable as _,
         transactions::{MantleTxBuilder, Ops, TxHash, states::Unverified},
     },
@@ -369,6 +370,10 @@ pub enum Error {
     /// The step proofs do not fit the steps of the inscription.
     #[error("step proofs rejected: {0}")]
     InvalidStepProofs(String),
+    /// The program key is not a valid Groth16 verification key; the ledger
+    /// would reject the registration. Not recoverable by retrying.
+    #[error("program key rejected: {0}")]
+    InvalidProgramKey(String),
 }
 
 /// Events emitted by the sequencer.
@@ -393,7 +398,7 @@ pub enum Error {
 )]
 pub enum Event {
     /// Fires per ingested block. Carries how the channel view moved
-    /// (`channel_update`), the deposits that turned canonical with it, and
+    /// (`channel_update`), the ops that turned canonical with it, and
     /// the finalized txs; any of them may be empty. Cold-start
     /// backfill emits one `BlocksProcessed` per batch with an empty
     /// [`ChannelUpdate::Extension`]: it walks finalized history, so there is
@@ -401,12 +406,12 @@ pub enum Event {
     BlocksProcessed {
         checkpoint: SequencerCheckpoint,
         channel_update: ChannelUpdate,
-        /// Channel deposits observed in the blocks this event covers, in
-        /// block and op order, before finality.
+        /// Channel deposits and program registrations in the blocks this
+        /// event covers, in block and op order, before finality.
         ///
         /// Observations, not view: reconcile against branch state, a branch
-        /// change can re-surface the same deposit or reorg it out.
-        deposits: Vec<DepositInfo>,
+        /// change can re-surface the same op or reorg it out.
+        observed: Vec<ObservedOp>,
         finalized: Vec<FinalizedTx>,
     },
     /// The sequencer is connected and ready to publish. Emitted once when
@@ -589,7 +594,7 @@ pub struct WithdrawInfo {
 ///
 /// Sequencers do not publish deposits — these are pure observations, the
 /// holder moving its own ledger notes into the channel. Reported in
-/// `BlocksProcessed::deposits` each time its block joins the canonical chain,
+/// `BlocksProcessed::observed` each time its block joins the canonical chain,
 /// like an adopted inscription, and in `finalized` once final.
 #[derive(Debug, Clone)]
 pub struct DepositInfo {
@@ -604,6 +609,30 @@ pub struct DepositInfo {
     pub outputs: OutputCommitments,
     /// Opaque metadata associated with this deposit.
     pub metadata: Metadata,
+}
+
+/// A program registration observed in an L1 block, by anyone: programs are
+/// global, and a zone waits for the one it uses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgramRegisterInfo {
+    /// The transaction hash containing this registration op.
+    pub tx_hash: TxHash,
+    /// The program's id, derived from its key: registering the same key
+    /// again registers nothing.
+    pub program_id: ProgramId,
+    /// The Groth16 verification key the program's step proofs verify under.
+    pub verification_key: ProgramVerificationKey,
+}
+
+/// An op observed on the canonical branch before finality.
+///
+/// Reported each time its block joins the canonical chain, so a branch
+/// change can report one again; never reported as removed. Dedup a deposit
+/// by `(tx_hash, op_id)` and a registration by `program_id`.
+#[derive(Debug, Clone)]
+pub enum ObservedOp {
+    Deposit(DepositInfo),
+    ProgramRegister(ProgramRegisterInfo),
 }
 
 // TODO(private-utxo): successor is the program note, a note of the channel
@@ -704,6 +733,8 @@ pub enum FinalizedOp {
     /// `parent_msg`/`this_msg` are config-lineage ids, not message-lineage
     /// ids.
     Config(ConfigInfo),
+    /// A program registration, by anyone.
+    ProgramRegister(ProgramRegisterInfo),
 }
 
 #[cfg(test)]

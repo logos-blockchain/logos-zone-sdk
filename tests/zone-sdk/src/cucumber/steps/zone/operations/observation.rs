@@ -427,3 +427,75 @@ pub async fn wait_for_lib_advance(
     .await
     .map_err(|_| ZoneTestError::LibAdvanceTimeout)?
 }
+
+/// Waits until the finalized channel history replayed from the indexer
+/// carries the registration of `program_id`.
+pub async fn wait_for_finalized_program(
+    reader: &ZoneReaderConfig,
+    program_id: ProgramId,
+    duration: Duration,
+) -> Result<(), ZoneTestError> {
+    timeout(duration, async {
+        loop {
+            let registered = replay_finalized_history(reader)
+                .await?
+                .iter()
+                .flat_map(|tx| tx.ops.iter())
+                .any(|op| matches!(op, FinalizedOp::ProgramRegister(p) if p.program_id == program_id));
+            if registered {
+                return Ok(());
+            }
+            sleep(Duration::from_millis(500)).await;
+        }
+    })
+    .await
+    .map_err(|_| ZoneTestError::IndexerTimeout)?
+}
+
+/// Waits until the sequencer's event stream reports the registration of
+/// `program_id`: observed on the canonical branch, or finalized when
+/// `finalized` is set. Drains the events channel as it goes.
+pub async fn wait_for_program_via_sequencer(
+    events: &mut tokio::sync::broadcast::Receiver<Event>,
+    program_id: ProgramId,
+    finalized: bool,
+    duration: Duration,
+) -> Result<(), ZoneTestError> {
+    timeout(duration, async {
+        loop {
+            let event = match events.recv().await {
+                Ok(event) => event,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    warn!("event subscriber lagged by {n}, recovering");
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    return Err(ZoneTestError::SequencerStopped);
+                }
+            };
+            let Event::BlocksProcessed {
+                observed,
+                finalized: finalized_txs,
+                ..
+            } = event
+            else {
+                continue;
+            };
+            let seen = if finalized {
+                finalized_txs
+                    .iter()
+                    .flat_map(|tx| tx.ops.iter())
+                    .any(|op| matches!(op, FinalizedOp::ProgramRegister(p) if p.program_id == program_id))
+            } else {
+                observed
+                    .iter()
+                    .any(|op| matches!(op, ObservedOp::ProgramRegister(p) if p.program_id == program_id))
+            };
+            if seen {
+                return Ok(());
+            }
+        }
+    })
+    .await
+    .map_err(|_| ZoneTestError::IndexerTimeout)?
+}

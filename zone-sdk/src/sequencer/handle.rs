@@ -10,6 +10,7 @@ use lb_core::{
                 inscribe::{Inscription, InscriptionOp, MiniBlocks},
             },
         },
+        programs::ProgramVerificationKey,
         transactions::{Ops, states::Unverified},
     },
     proofs::channel_multi_sig_proof::IndexedSignatures,
@@ -17,7 +18,7 @@ use lb_core::{
 use lb_key_management_system_service::keys::Ed25519Signature;
 
 use super::{
-    types::{Error, PreparedChannelConfig},
+    types::{Error, PreparedChannelConfig, ProgramRegisterInfo, SequencerCheckpoint},
     zone_sequencer::ZoneSequencer,
 };
 use crate::{adapter, sequencer::zone_sequencer::PublishReceipt};
@@ -183,6 +184,20 @@ where
                 configuration_threshold,
             )
             .await
+    }
+
+    /// Register a program by its verification key: one funded
+    /// `ProgramRegister` op, no signature. Registering a key already
+    /// registered has no effect, so repeating the call is safe. The
+    /// sequencer re-posts and re-funds the tx until it finalizes; the
+    /// registration is reported as `ObservedOp::ProgramRegister` when its
+    /// block joins the canonical chain and as `FinalizedOp::ProgramRegister`
+    /// once final.
+    pub async fn register_program(
+        &mut self,
+        verification_key: ProgramVerificationKey,
+    ) -> Result<(ProgramRegisterInfo, SequencerCheckpoint), Error> {
+        self.sequencer.do_register_program(verification_key).await
     }
 
     /// Build and fund a channel-config tx for external multi-sig signing.

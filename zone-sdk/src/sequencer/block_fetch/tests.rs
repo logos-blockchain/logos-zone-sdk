@@ -27,7 +27,7 @@ use crate::{
     adapter::DepositEvent,
     test_support::{
         FORK_DIGEST, MockNode, api_block, deposit_event, header_id, inscribe_op, live_event,
-        unverified_tx_with_ops,
+        observed_deposit_ids, unverified_tx_with_ops,
     },
 };
 
@@ -634,8 +634,7 @@ async fn canonical_backfill_gap_deposits_are_observed() {
     let mut state = None;
     let r = drive_with(&node, &mut state, ch, &[live_event(&b1), live_event(&b3)]).await;
 
-    let observed: Vec<_> = r[1].result.deposits.iter().map(|d| d.op_id).collect();
-    assert_eq!(observed, vec![d2, d3]);
+    assert_eq!(observed_deposit_ids(&r[1].result.observed), vec![d2, d3]);
 }
 
 /// A deposit-events fetch failing on a later gap block, after an earlier
@@ -720,8 +719,7 @@ async fn deposit_events_failure_on_a_later_gap_block_applies_nothing() {
     .await
     .expect("B4 processes once B3's events are served");
 
-    let observed: Vec<_> = retried.deposits.iter().map(|d| d.op_id).collect();
-    assert_eq!(observed, vec![d2, d3, d4]);
+    assert_eq!(observed_deposit_ids(&retried.observed), vec![d2, d3, d4]);
 }
 
 /// A gap block the node cannot serve fails the event and leaves state
@@ -1114,7 +1112,7 @@ async fn fork_block_deposit_is_reported_when_its_branch_turns_canonical() {
 
     let reported: Vec<Vec<_>> = r
         .iter()
-        .map(|driven| driven.result.deposits.iter().map(|d| d.op_id).collect())
+        .map(|driven| observed_deposit_ids(&driven.result.observed))
         .collect();
     assert_eq!(
         reported,

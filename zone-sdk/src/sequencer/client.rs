@@ -10,6 +10,7 @@ use lb_core::{
                 inscribe::{Inscription, InscriptionOp, MiniBlocks},
             },
         },
+        programs::ProgramVerificationKey,
         transactions::{Ops, states::Unverified},
     },
     proofs::channel_multi_sig_proof::IndexedSignatures,
@@ -19,8 +20,8 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use super::{
     types::{
-        Error, Event, PreparedChannelConfig, SequencerChannelView, SequencerCheckpoint,
-        TurnNotification,
+        Error, Event, PreparedChannelConfig, ProgramRegisterInfo, SequencerChannelView,
+        SequencerCheckpoint, TurnNotification,
     },
     zone_sequencer::ActorRequest,
 };
@@ -125,6 +126,19 @@ impl SequencerClient {
             posting_timeframe,
             posting_timeout,
             configuration_threshold,
+            response_tx,
+        })?;
+        Self::recv(response_rx).await?
+    }
+
+    /// Async counterpart of [`super::SequencerHandle::register_program`].
+    pub async fn register_program(
+        &self,
+        verification_key: ProgramVerificationKey,
+    ) -> Result<(ProgramRegisterInfo, SequencerCheckpoint), Error> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.send(ActorRequest::RegisterProgram {
+            verification_key: Box::new(verification_key),
             response_tx,
         })?;
         Self::recv(response_rx).await?

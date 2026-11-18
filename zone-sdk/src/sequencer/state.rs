@@ -41,7 +41,7 @@ fn inscription_steps(tx: &SignedOps<Unverified, StandardMode>) -> InscriptionSte
 use super::{
     block_fetch::{channel_configs, channel_inscriptions, is_pure_config},
     block_states::{BlockChannelTx, BlockStates, ChannelTxKind, SharedTx},
-    types::{ChannelUpdateTx, DepositInfo, Error, InscriptionInfo, PendingFunding, PendingTx},
+    types::{ChannelUpdateTx, Error, InscriptionInfo, ObservedOp, PendingFunding, PendingTx},
 };
 use crate::{InscriptionSteps, inscribes};
 
@@ -83,6 +83,10 @@ struct PendingOtherTx {
     last_config: Option<MsgId>,
     /// Submission order, for checkpoint serialization.
     seq: u64,
+    /// The ops before funding, for a tx the sequencer built and can re-fund
+    /// without a signature; `None` for one it only submitted or mirrored,
+    /// which is shed when stale instead.
+    pre_fund: Option<MantleTxBuilder>,
     /// The LIB slot this tx was funded at; `None` for one mirrored from a
     /// block, which expires on `unmined_since` instead.
     funded_at: Option<Slot>,
@@ -357,6 +361,9 @@ impl TxState {
             }
         } else if let Some(entry) = self.pending_other.get_mut(tx_hash) {
             entry.funded_at = Some(funded_at);
+            if pre_fund.is_some() {
+                entry.pre_fund = pre_fund;
+            }
         }
     }
 
@@ -386,7 +393,7 @@ impl TxState {
                 entry.funded_at.map(|funded_at| PendingFunding {
                     tx_hash: *hash,
                     funded_at,
-                    pre_fund: None,
+                    pre_fund: entry.pre_fund.clone(),
                 })
             }))
             .collect();
@@ -499,6 +506,19 @@ impl TxState {
                     step_proofs: inscription_steps(&p.signed_tx).proofs.to_vec(),
                 })
             })
+            .chain(self.pending_other.iter().filter_map(|(hash, entry)| {
+                let expired =
+                    !safe.contains(hash) && Self::expired(entry.funded_at, lib_slot, window);
+                expired
+                    .then(|| entry.pre_fund.clone())
+                    .flatten()
+                    .map(|pre_fund| RefundCandidate {
+                        tx_hash: *hash,
+                        pre_fund,
+                        // A registration takes no proof.
+                        step_proofs: Vec::new(),
+                    })
+            }))
             .collect();
         candidates.sort_unstable_by_key(|c| c.tx_hash.0);
         candidates
@@ -541,7 +561,8 @@ impl TxState {
                 self.pending_other
                     .iter()
                     .filter(|(hash, entry)| {
-                        !safe.contains(hash)
+                        entry.pre_fund.is_none()
+                            && !safe.contains(hash)
                             && Self::expired(
                                 entry.funded_at.or(entry.unmined_since),
                                 lib_slot,
@@ -607,9 +628,9 @@ impl TxState {
         parent.into_iter().chain(config_parent)
     }
 
-    /// Swap a re-funded own inscription in under its new hash: same parent,
-    /// message id and payload, funded at `funded_at`, not yet posted.
-    /// Returns the new hash, or `None` when `old` is not pending.
+    /// Swap a re-funded own tx in under its new hash: same ops, funded at
+    /// `funded_at`; an inscription is not yet posted again. Returns the new
+    /// hash, or `None` when `old` is not pending.
     pub fn replace_pending(
         &mut self,
         old: &TxHash,
@@ -617,19 +638,32 @@ impl TxState {
         pre_fund: MantleTxBuilder,
         funded_at: Slot,
     ) -> Option<TxHash> {
-        let mut entry = self.pending.remove(old)?;
-        if self.pending_by_parent.get(&entry.parent_msg) == Some(old) {
-            self.pending_by_parent.remove(&entry.parent_msg);
-        }
         let signed_tx: SharedTx = signed_tx.into();
         let new_hash = signed_tx.hash();
-        entry.tx_hash = new_hash;
+        if let Some(mut entry) = self.pending.remove(old) {
+            if self.pending_by_parent.get(&entry.parent_msg) == Some(old) {
+                self.pending_by_parent.remove(&entry.parent_msg);
+            }
+            entry.tx_hash = new_hash;
+            entry.signed_tx = signed_tx;
+            entry.posted = false;
+            entry.pre_fund = Some(pre_fund);
+            entry.funded_at = Some(funded_at);
+            self.pending_by_parent.insert(entry.parent_msg, new_hash);
+            self.pending.insert(new_hash, entry);
+            return Some(new_hash);
+        }
+        let mut entry = self.pending_other.remove(old)?;
+        if let Some(parent) = entry.first_parent
+            && self.pending_by_parent.get(&parent) == Some(old)
+        {
+            self.pending_by_parent.insert(parent, new_hash);
+        }
         entry.signed_tx = signed_tx;
-        entry.posted = false;
         entry.pre_fund = Some(pre_fund);
         entry.funded_at = Some(funded_at);
-        self.pending_by_parent.insert(entry.parent_msg, new_hash);
-        self.pending.insert(new_hash, entry);
+        entry.unmined_since = None;
+        self.pending_other.insert(new_hash, entry);
         Some(new_hash)
     }
 
@@ -885,6 +919,7 @@ impl TxState {
                 config_parent,
                 last_config,
                 seq,
+                pre_fund: None,
                 funded_at: None,
                 unmined_since: None,
             },
@@ -901,10 +936,10 @@ impl TxState {
         lib: HeaderId,
         our_txs: impl IntoIterator<Item = TxHash>,
         channel_txs: Vec<BlockChannelTx>,
-        deposits: Vec<DepositInfo>,
+        observed: Vec<ObservedOp>,
     ) {
         self.blocks
-            .insert(block_id, parent_id, our_txs, channel_txs, deposits);
+            .insert(block_id, parent_id, our_txs, channel_txs, observed);
 
         // When lib advances: update finalized_msg and prune.
         // NOTE: we do NOT remove pending txs here. Pending txs are only
@@ -1488,14 +1523,14 @@ impl TxState {
         self.blocks.notes_at(tip)
     }
 
-    /// See [`BlockStates::deposits_newly_canonical`].
+    /// See [`BlockStates::observed_newly_canonical`].
     #[must_use]
-    pub fn deposits_newly_canonical(
+    pub fn observed_newly_canonical(
         &self,
         old_tip: Option<HeaderId>,
         tip: HeaderId,
-    ) -> Vec<DepositInfo> {
-        self.blocks.deposits_newly_canonical(old_tip, tip)
+    ) -> Vec<ObservedOp> {
+        self.blocks.observed_newly_canonical(old_tip, tip)
     }
 
     /// Channel txs on `tip`'s branch strictly above LIB (finalized never
@@ -1597,13 +1632,78 @@ impl TxState {
 mod tests {
     use lb_core::mantle::{
         Op,
-        ops::channel::inscribe::{InscriptionOp, MiniBlocks},
+        ops::{
+            channel::inscribe::{InscriptionOp, MiniBlocks},
+            program::ProgramRegisterOp,
+        },
         transactions::Ops,
     };
     use lb_key_management_system_service::keys::Ed25519PublicKey;
 
     use super::*;
-    use crate::test_support::{FORK_DIGEST, header_id};
+    use crate::test_support::{FORK_DIGEST, header_id, unverified_tx_with_ops};
+
+    fn register_tx(seed: u8) -> SignedOps<Unverified, StandardMode> {
+        let mut key = ProgramRegisterOp::sample();
+        // Any canonical key: the ledger's curve checks do not run here.
+        let mut bytes = key.verification_key.to_bytes();
+        bytes[0] ^= seed;
+        key.verification_key =
+            lb_core::mantle::programs::ProgramVerificationKey::try_from_bytes(&bytes).unwrap();
+        unverified_tx_with_ops(vec![Op::ProgramRegister(key)])
+    }
+
+    /// An own registration past the window is re-funded, not shed, and the
+    /// rebuilt tx takes its place under the new hash.
+    #[test]
+    fn expired_registration_is_refunded_not_shed() {
+        let genesis = header_id(0);
+        let tip = header_id(1);
+        let channel_id = ChannelId::from([0u8; 32]);
+        let mut state = TxState::new(genesis, MsgId::root());
+        state.process_block(tip, genesis, genesis, vec![], vec![], vec![]);
+        let tx = register_tx(0);
+        let hash = tx.hash();
+        state.submit_other(tx, channel_id).unwrap();
+        state.stamp_funding(&hash, Slot::from(1), Some(MantleTxBuilder::new()));
+
+        let shed = state.shed_block(tip, Slot::from(40), 30);
+        assert!(shed.expired.is_empty(), "a re-fundable entry is not shed");
+        let candidates = state.refund_candidates(tip, Slot::from(40), 30, usize::MAX);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].tx_hash, hash);
+
+        let rebuilt = register_tx(1);
+        let new_hash = rebuilt.hash();
+        assert_eq!(
+            state.replace_pending(&hash, rebuilt, MantleTxBuilder::new(), Slot::from(40)),
+            Some(new_hash)
+        );
+        let pending: Vec<_> = state.pending_txs(tip).into_iter().map(|(h, _)| h).collect();
+        assert_eq!(pending, vec![new_hash]);
+        assert_eq!(state.funding_records().len(), 1);
+        assert_eq!(state.funding_records()[0].funded_at, Slot::from(40));
+        assert!(state.funding_records()[0].pre_fund.is_some());
+    }
+
+    /// A tracked tx with no channel op is mined by its hash alone, so it is
+    /// not re-posted once a block carries it.
+    #[test]
+    fn tracked_registration_reads_mined_in_its_block() {
+        let genesis = header_id(0);
+        let b1 = header_id(1);
+        let channel_id = ChannelId::from([0u8; 32]);
+        let mut state = TxState::new(genesis, MsgId::root());
+        let tx = register_tx(0);
+        let hash = tx.hash();
+        state.submit_other(tx, channel_id).unwrap();
+
+        state.process_block(b1, genesis, genesis, vec![hash], vec![], vec![]);
+        assert!(
+            state.pending_txs(b1).is_empty(),
+            "mined: nothing to re-post"
+        );
+    }
 
     /// A mined channel tx as the block store holds it.
     fn stored(tx: &SignedOps<Unverified, StandardMode>, kind: ChannelTxKind) -> BlockChannelTx {
@@ -2302,7 +2402,7 @@ mod tests {
         let mut state = TxState::new(genesis, MsgId::root());
         state.process_block(tip, genesis, genesis, vec![], vec![], vec![]);
         let op = InscriptionOp::sample_with_step();
-        let tx = crate::test_support::unverified_tx_with_ops(vec![Op::ChannelInscribe(op.clone())]);
+        let tx = unverified_tx_with_ops(vec![Op::ChannelInscribe(op.clone())]);
         let hash = tx.hash();
         let proofs = inscription_steps(&tx).proofs.to_vec();
         assert_eq!(proofs.len(), op.steps_len());
@@ -3753,7 +3853,7 @@ mod tests {
         let block2 = header_id(2);
         let op = InscriptionOp::sample_with_step();
         let mut state = TxState::new(genesis, op.parent);
-        let tx = crate::test_support::unverified_tx_with_ops(vec![Op::ChannelInscribe(op.clone())]);
+        let tx = unverified_tx_with_ops(vec![Op::ChannelInscribe(op.clone())]);
         let steps = inscription_steps(&tx);
         assert_eq!(steps.proofs.len(), op.steps_len());
         state

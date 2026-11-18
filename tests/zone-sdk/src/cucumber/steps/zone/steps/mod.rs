@@ -18,11 +18,11 @@ use super::{
     CustomRepublishDeps, PublishDeadline,
     actions::{
         DriveMode, initialize_zone_indexer, prepare_zone_channel_config, publish_zone_messages,
-        publish_zone_messages_concurrently, register_zone_sequencers_with_shared_key,
-        remember_published_zone_message, save_zone_checkpoint, sign_prepared_zone_channel_config,
-        start_named_sequencer, start_named_sequencer_with_pending_submit_depth,
-        start_nodes_with_zone_resources, stop_zone_sequencer, submit_prepared_zone_channel_config,
-        submit_zone_channel_config,
+        publish_zone_messages_concurrently, register_zone_program,
+        register_zone_sequencers_with_shared_key, remember_published_zone_message,
+        save_zone_checkpoint, sign_prepared_zone_channel_config, start_named_sequencer,
+        start_named_sequencer_with_pending_submit_depth, start_nodes_with_zone_resources,
+        stop_zone_sequencer, submit_prepared_zone_channel_config, submit_zone_channel_config,
     },
     assertions::{
         assert_sorted_outcome, scan_indexer_for_payloads, wait_for_indexer_unordered,
@@ -39,8 +39,9 @@ use super::{
         zone_config_row, zone_message_rows, zone_node_resource_rows, zone_sequencer_start_rows,
         zone_sequencing_state_row,
     },
-    wait_for_channel_view, wait_for_exact_indexed_payload_count, wait_for_lib_advance,
-    wait_for_transactions_finalized, wait_for_turn_to_write,
+    wait_for_channel_view, wait_for_exact_indexed_payload_count, wait_for_finalized_program,
+    wait_for_lib_advance, wait_for_program_via_sequencer, wait_for_transactions_finalized,
+    wait_for_turn_to_write,
 };
 use crate::cucumber::world::{ZoneSequencerStartup, ZoneWorld};
 

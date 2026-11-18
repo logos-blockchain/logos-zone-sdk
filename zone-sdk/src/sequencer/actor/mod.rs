@@ -14,9 +14,9 @@ use super::{
     block_fetch::{BlockEventResult, common_prefix, handle_block_event, orphans_from_shed},
     slot_clock::{SlotClock, slot_to_u64},
     state::{BlockShed, ChannelUpdateInfo, RefundCandidate, TxState},
-    tx_builder::{fund_builder, sign_own_tx},
+    tx_builder::{fund_builder, registers_program, sign_own_tx, sign_register_tx},
     types::{
-        ChannelUpdate, ChannelUpdateTx, DepositInfo, Error, Event, FinalizedTx,
+        ChannelUpdate, ChannelUpdateTx, Error, Event, FinalizedTx, ObservedOp,
         SequencerChannelView, SequencerCheckpoint, TurnNotification,
     },
     zone_sequencer::{ZoneSequencer, build_checkpoint},
@@ -114,14 +114,14 @@ where
         let reconnected = !self.connected;
         self.connected = true;
         let became_ready = self.maybe_signal_ready();
-        let (channel_update, deposits, finalized) = self.apply_block_result(result);
+        let (channel_update, observed, finalized) = self.apply_block_result(result);
 
         let block_event = self
             .publish_checkpoint()
             .map(|checkpoint| Event::BlocksProcessed {
                 checkpoint,
                 channel_update,
-                deposits,
+                observed,
                 finalized,
             });
         if let Some(ev) = block_event {
@@ -478,7 +478,11 @@ where
     async fn refund_one(&mut self, candidate: RefundCandidate) -> Result<TxHash, Error> {
         let (tx, transfer_proof) =
             fund_builder(&self.node, &self.config.funding, candidate.pre_fund.clone()).await?;
-        let signed = sign_own_tx(tx, transfer_proof, &self.signing_key, candidate.step_proofs)?;
+        let signed = if registers_program(&tx) {
+            sign_register_tx(tx, transfer_proof)?
+        } else {
+            sign_own_tx(tx, transfer_proof, &self.signing_key, candidate.step_proofs)?
+        };
         let funded_at = self.lib_slot;
         self.state
             .as_mut()
@@ -575,12 +579,12 @@ where
     fn apply_block_result(
         &mut self,
         result: BlockEventResult,
-    ) -> (ChannelUpdate, Vec<DepositInfo>, Vec<FinalizedTx>) {
+    ) -> (ChannelUpdate, Vec<ObservedOp>, Vec<FinalizedTx>) {
         let BlockEventResult {
             finalized_items,
             channel_update,
             view_before,
-            deposits,
+            observed,
         } = result;
         let lineage_changed = channel_update.is_some();
         let (adopted, mut orphaned) = channel_update.map_or_else(
@@ -650,7 +654,7 @@ where
             }
         };
 
-        (channel_update, deposits, finalized_items)
+        (channel_update, observed, finalized_items)
     }
 
     fn log_channel_update(update: &ChannelUpdateInfo) {

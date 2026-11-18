@@ -21,6 +21,7 @@ use lb_core::{
                 inscribe::{Inscription, InscriptionOp, MiniBlocks},
             },
         },
+        programs::{ProgramVerificationKey, derive_program_id},
         traits::Hashable as _,
         transactions::{Ops, hash::TxHash, states::Unverified},
     },
@@ -40,14 +41,14 @@ use super::{
     state::{ParentTaken, TxState},
     tx_builder::{
         assemble_channel_config_tx, build_and_fund_config, check_step_proofs,
-        create_channel_config_tx, create_inscribe_tx, inscription_op,
+        create_channel_config_tx, create_inscribe_tx, create_program_register_tx, inscription_op,
         prepare_tx as build_prepare_tx, sign_tx as build_sign_tx, stale_parent_reason,
-        validate_multi_sig,
+        validate_multi_sig, validate_program_key,
     },
     types::{
         ChannelUpdateTx, Error, Event, FundingConfig, InscriptionInfo, PendingTx,
-        PreparedChannelConfig, PublishResult, SequencerChannelView, SequencerCheckpoint,
-        SequencerConfig, TurnNotification,
+        PreparedChannelConfig, ProgramRegisterInfo, PublishResult, SequencerChannelView,
+        SequencerCheckpoint, SequencerConfig, TurnNotification,
     },
 };
 use crate::{InscriptionSteps, adapter, adapter::BoxStream, inscribes};
@@ -207,6 +208,11 @@ pub(super) enum ActorRequest {
         tx: SignedOps<Unverified, StandardMode>,
         msg_id: MsgId,
         response_tx: oneshot::Sender<Result<PublishReceipt, Error>>,
+    },
+    RegisterProgram {
+        // Boxed: a 352-byte key, larger than the other variants' payloads.
+        verification_key: Box<ProgramVerificationKey>,
+        response_tx: oneshot::Sender<Result<(ProgramRegisterInfo, SequencerCheckpoint), Error>>,
     },
     PrepareTx {
         ops: Ops,
@@ -669,6 +675,12 @@ where
             } => {
                 drop(response_tx.send(self.do_submit_signed_tx(tx, msg_id)));
             }
+            ActorRequest::RegisterProgram {
+                verification_key,
+                response_tx,
+            } => {
+                drop(response_tx.send(self.do_register_program(*verification_key).await));
+            }
             ActorRequest::PrepareTx {
                 ops,
                 data,
@@ -935,6 +947,47 @@ where
         };
         let publish_receipt = (publish_result, checkpoint);
         Ok((publish_receipt, signed_tx))
+    }
+
+    /// Register a program: one funded `ProgramRegister` op, which takes no
+    /// proof. Tracked like an own inscription minus the lineage: re-posted
+    /// and re-funded until it finalizes, never part of the channel view.
+    pub(super) async fn do_register_program(
+        &mut self,
+        verification_key: ProgramVerificationKey,
+    ) -> Result<(ProgramRegisterInfo, SequencerCheckpoint), Error> {
+        self.ensure_ready()?;
+        self.ensure_fundable()?;
+        validate_program_key(&verification_key)?;
+
+        let program_id = derive_program_id(&verification_key);
+        let (signed_tx, pre_fund) =
+            create_program_register_tx(&self.node, &self.config.funding, verification_key.clone())
+                .await?;
+        let tx_hash = signed_tx.hash();
+
+        // Safe to unwrap — `ensure_ready` checks state.
+        let state = self.state.as_mut().unwrap();
+        state.submit_other(signed_tx.clone(), self.channel_id)?;
+        state.stamp_funding(&tx_hash, self.lib_slot, Some(pre_fund));
+
+        info!(
+            target: TARGET,
+            "Submitted program_register transaction {} for program {program_id}",
+            hex::encode(tx_hash.0)
+        );
+
+        self.queue_publish_post(tx_hash, signed_tx);
+
+        let checkpoint = self.publish_checkpoint().ok_or(Error::Unavailable {
+            reason: "checkpoint unavailable",
+        })?;
+        let info = ProgramRegisterInfo {
+            tx_hash,
+            program_id,
+            verification_key,
+        };
+        Ok((info, checkpoint))
     }
 
     /// Build and fund a channel-config tx for external multi-sig signing,

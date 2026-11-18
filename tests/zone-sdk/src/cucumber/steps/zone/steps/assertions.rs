@@ -6,9 +6,74 @@ use super::{
     collect_indexed_messages, collect_indexed_messages_exactly_once, ensure_zone_message_included,
     ensure_zone_transactions_included, log_step_error, make_inscription, parse_balance_payload,
     replay_finalized_history, scan_indexer_for_payloads, single_column_table,
-    wait_for_exact_indexed_payload_count, wait_for_indexer_unordered,
-    wait_for_transactions_finalized, wait_until_sorted_conflict_settles, zone_step_error,
+    wait_for_exact_indexed_payload_count, wait_for_finalized_program, wait_for_indexer_unordered,
+    wait_for_program_via_sequencer, wait_for_transactions_finalized,
+    wait_until_sorted_conflict_settles, zone_step_error,
 };
+
+#[cucumber::then(
+    expr = "sequencer {string} observes program registration {string} in {int} seconds"
+)]
+async fn step_sequencer_observes_program(
+    world: &mut ZoneWorld,
+    step: &Step,
+    sequencer_alias: String,
+    program_alias: String,
+    timeout_seconds: u64,
+) -> StepResult {
+    let program_id = world.zone.program(&program_alias)?.program_id;
+    let events = log_step_error(step, world.zone.sequencer_events_mut(&sequencer_alias))?;
+    wait_for_program_via_sequencer(
+        events,
+        program_id,
+        false,
+        Duration::from_secs(timeout_seconds),
+    )
+    .await
+    .map_err(|error| zone_step_error(step, &error))
+}
+
+#[cucumber::then(
+    expr = "sequencer {string} finalizes program registration {string} in {int} seconds"
+)]
+async fn step_sequencer_finalizes_program(
+    world: &mut ZoneWorld,
+    step: &Step,
+    sequencer_alias: String,
+    program_alias: String,
+    timeout_seconds: u64,
+) -> StepResult {
+    let program_id = world.zone.program(&program_alias)?.program_id;
+    let events = log_step_error(step, world.zone.sequencer_events_mut(&sequencer_alias))?;
+    wait_for_program_via_sequencer(
+        events,
+        program_id,
+        true,
+        Duration::from_secs(timeout_seconds),
+    )
+    .await
+    .map_err(|error| zone_step_error(step, &error))
+}
+
+#[cucumber::then(
+    expr = "the zone indexer returns finalized program registration {string} in {int} seconds"
+)]
+#[expect(
+    clippy::needless_pass_by_ref_mut,
+    reason = "Cucumber step functions require `&mut World` as the first parameter"
+)]
+async fn step_zone_indexer_returns_finalized_program(
+    world: &mut ZoneWorld,
+    step: &Step,
+    program_alias: String,
+    timeout_seconds: u64,
+) -> StepResult {
+    let program_id = world.zone.program(&program_alias)?.program_id;
+    let indexer = log_step_error(step, world.zone.indexer())?;
+    wait_for_finalized_program(indexer, program_id, Duration::from_secs(timeout_seconds))
+        .await
+        .map_err(|error| zone_step_error(step, &error))
+}
 
 #[cucumber::then("the channel view contract holds for all zone sequencers")]
 #[expect(

@@ -15,6 +15,7 @@ use lb_common_http_client::{ApiBlock, CommonHttpClient, Slot};
 use lb_core::mantle::{
     Op, OpProof,
     gas::GasCost,
+    notes::ProgramId,
     ops::channel::{
         ChannelId, MsgId,
         inscribe::{Inscription, InscriptionOp},
@@ -39,8 +40,8 @@ use tracing::warn;
 
 use super::runner::{
     self, ChannelUpdate, ChannelUpdateTx, Event, FinalizedOp, FinalizedTx, FundingConfig,
-    InscriptionId, InscriptionInfo, PublishResult, SequencerChannelView, SequencerCheckpoint,
-    SequencerClient, SequencerConfig, TurnNotification,
+    InscriptionId, InscriptionInfo, ObservedOp, PublishResult, SequencerChannelView,
+    SequencerCheckpoint, SequencerClient, SequencerConfig, TurnNotification,
 };
 
 /// Inscriptions in the just-finalized txs — the permanent, settled part of the
@@ -53,7 +54,10 @@ fn finalized_inscriptions(finalized: &[FinalizedTx]) -> impl Iterator<Item = &In
         .flat_map(|tx| tx.ops.iter())
         .filter_map(|op| match op {
             FinalizedOp::Inscription(info) => Some(info),
-            FinalizedOp::Deposit(_) | FinalizedOp::Withdraw(_) | FinalizedOp::Config(_) => None,
+            FinalizedOp::Deposit(_)
+            | FinalizedOp::Withdraw(_)
+            | FinalizedOp::Config(_)
+            | FinalizedOp::ProgramRegister(_) => None,
         })
 }
 
@@ -110,6 +114,8 @@ pub enum ZoneTestError {
     FinalizationTimeout,
     #[error("timed out waiting for zone LIB to advance")]
     LibAdvanceTimeout,
+    #[error("zone sequencer event stream stopped before observing the expected event")]
+    SequencerStopped,
     #[error("timed out waiting for zone sequencer channel view condition: {message}")]
     ChannelViewTimeout { message: String },
     #[error("failed to build custom zone transaction: {message}")]
@@ -184,8 +190,8 @@ pub(super) use observation::{
     ensure_zone_message_included, ensure_zone_transactions_included, keygen, parse_balance_payload,
     publish_message_with_retry, replay_finalized_history, replayed_inscription_payloads,
     sequencer_config, sequencer_config_with_pending_submit_depth, wait_for_channel_view,
-    wait_for_exact_indexed_payload_count, wait_for_lib_advance, wait_for_transactions_finalized,
-    wait_for_turn_to_write,
+    wait_for_exact_indexed_payload_count, wait_for_finalized_program, wait_for_lib_advance,
+    wait_for_program_via_sequencer, wait_for_transactions_finalized, wait_for_turn_to_write,
 };
 pub(super) use policies::{
     start_balance_aware_policy, start_republish_lineage_policy, start_sequencer_event_loop,
