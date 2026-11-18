@@ -122,6 +122,8 @@ pub mod node_types {
     };
 }
 
+use std::sync::Arc;
+
 pub use lb_common_http_client::{CommonHttpClient, Slot};
 use lb_core::{
     crypto::Hash,
@@ -170,7 +172,7 @@ pub struct ZoneBlock {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InscriptionSteps {
     pub mini_blocks: MiniBlocks,
-    pub proofs: Vec<StepProof>,
+    pub proofs: Arc<[StepProof]>,
 }
 
 impl InscriptionSteps {
@@ -180,23 +182,26 @@ impl InscriptionSteps {
         };
         Self {
             mini_blocks: op.mini_blocks.clone(),
-            proofs: proof.step_proofs.clone(),
+            proofs: proof.step_proofs.as_slice().into(),
         }
     }
+}
+
+/// The ops of `tx` with their proofs, in op order.
+pub(crate) fn ops_with_proofs<State: VerificationState, Mode: VerificationMode>(
+    tx: &SignedOps<State, Mode>,
+) -> impl Iterator<Item = (OpRef<'_>, OpProofRef<'_>)> {
+    tx.op_refs_iter().zip(tx.op_proof_refs_iter())
 }
 
 /// The inscriptions of `tx` with their steps, in op order.
 pub(crate) fn inscribes<State: VerificationState, Mode: VerificationMode>(
     tx: &SignedOps<State, Mode>,
 ) -> impl Iterator<Item = (&InscriptionOp, InscriptionSteps)> {
-    tx.op_refs_iter()
-        .zip(tx.op_proof_refs_iter())
-        .filter_map(|(op, proof)| match op {
-            OpRef::ChannelInscribe(inscribe) => {
-                Some((inscribe, InscriptionSteps::of(inscribe, proof)))
-            }
-            _ => None,
-        })
+    ops_with_proofs(tx).filter_map(|(op, proof)| match op {
+        OpRef::ChannelInscribe(inscribe) => Some((inscribe, InscriptionSteps::of(inscribe, proof))),
+        _ => None,
+    })
 }
 
 /// A deposit from a zone channel, included/finalized in Bedrock

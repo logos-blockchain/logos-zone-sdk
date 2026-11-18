@@ -31,7 +31,7 @@ use super::{
 use crate::{
     InscriptionSteps, adapter,
     adapter::{DepositEvents, DepositOpKey},
-    inscribes,
+    inscribes, ops_with_proofs,
 };
 
 /// Result of processing a block event.
@@ -685,7 +685,7 @@ fn extract_finalized_items(
     for tx in transactions {
         let tx_hash = tx.op_refs().hash();
         let mut ops: Vec<FinalizedOp> = Vec::new();
-        for (op, proof) in tx.op_refs_iter().zip(tx.op_proof_refs_iter()) {
+        for (op, proof) in ops_with_proofs(tx) {
             match op {
                 OpRef::ChannelInscribe(inscribe) if inscribe.channel_id == channel_id => {
                     // Chain order is asserted by `classify_channel_txs`,
@@ -905,7 +905,7 @@ pub(super) fn classify_channel_tx(
     let mut transfers = 0usize;
     let mut foreign_ops = false;
 
-    for (op, proof) in tx.op_refs_iter().zip(tx.op_proof_refs_iter()) {
+    for (op, proof) in ops_with_proofs(tx) {
         match op {
             OpRef::ChannelInscribe(inscribe) if inscribe.channel_id == channel_id => {
                 if let Some(prev) = *block_tip {

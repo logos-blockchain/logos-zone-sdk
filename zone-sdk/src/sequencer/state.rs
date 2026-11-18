@@ -496,7 +496,7 @@ impl TxState {
                 p.pre_fund.clone().map(|pre_fund| RefundCandidate {
                     tx_hash: *hash,
                     pre_fund,
-                    step_proofs: inscription_steps(&p.signed_tx).proofs,
+                    step_proofs: inscription_steps(&p.signed_tx).proofs.to_vec(),
                 })
             })
             .collect();
@@ -2304,7 +2304,7 @@ mod tests {
         let op = InscriptionOp::sample_with_step();
         let tx = crate::test_support::unverified_tx_with_ops(vec![Op::ChannelInscribe(op.clone())]);
         let hash = tx.hash();
-        let proofs = inscription_steps(&tx).proofs;
+        let proofs = inscription_steps(&tx).proofs.to_vec();
         assert_eq!(proofs.len(), op.steps_len());
         state
             .submit_inscription(tx, op.parent, op.id(), op.inscription)
@@ -3742,6 +3742,53 @@ mod tests {
         assert_eq!(state.channel_tip_at(b2), msg_id(1));
         assert!(state.pending_txs(b2).iter().any(|(h, _)| *h == p_hash));
         assert!(shed_lineage(&mut state, b2).is_empty());
+    }
+
+    /// A pending inscription with steps displaced by a competing one is
+    /// reported orphaned with its steps and their proofs.
+    #[test]
+    fn orphaned_pending_inscription_reports_its_steps() {
+        let genesis = header_id(0);
+        let block1 = header_id(1);
+        let block2 = header_id(2);
+        let op = InscriptionOp::sample_with_step();
+        let mut state = TxState::new(genesis, op.parent);
+        let tx = crate::test_support::unverified_tx_with_ops(vec![Op::ChannelInscribe(op.clone())]);
+        let steps = inscription_steps(&tx);
+        assert_eq!(steps.proofs.len(), op.steps_len());
+        state
+            .submit_inscription(tx, op.parent, op.id(), op.inscription.clone())
+            .unwrap();
+        state.process_block(block1, genesis, genesis, vec![], vec![], vec![]);
+        let old_lineage = state.channel_lineage(block1);
+
+        let rival = make_dummy_tx(99);
+        let rival_hash = rival.hash();
+        let rival_info = InscriptionInfo {
+            tx_hash: rival_hash,
+            parent_msg: op.parent,
+            this_msg: msg_id(20),
+            payload: Inscription::new_unchecked(vec![99]),
+            signer: Some(test_signer()),
+            steps: InscriptionSteps::default(),
+        };
+        state.process_block(
+            block2,
+            block1,
+            genesis,
+            vec![rival_hash],
+            vec![stored(&rival, ChannelTxKind::Inscription(rival_info))],
+            vec![],
+        );
+
+        let update = state
+            .detect_channel_update(&old_lineage, block2, &HashSet::new())
+            .expect("the rival displaces the pending inscription");
+        let orphaned = update.orphaned[0]
+            .inscription()
+            .expect("the orphaned tx is the inscription");
+        assert_eq!(orphaned.this_msg, op.id());
+        assert_eq!(orphaned.steps, steps);
     }
 
     #[test]

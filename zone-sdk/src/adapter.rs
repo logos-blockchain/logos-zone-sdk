@@ -31,7 +31,7 @@ use lb_log_targets::zone_sdk;
 use reqwest::Url;
 use tracing::error;
 
-use crate::{Deposit, InscriptionSteps, Withdraw, ZoneBlock, ZoneMessage};
+use crate::{Deposit, InscriptionSteps, Withdraw, ZoneBlock, ZoneMessage, ops_with_proofs};
 
 const TARGET: &str = zone_sdk::ADAPTER;
 
@@ -355,8 +355,7 @@ fn block_to_messages<State: VerificationState, Mode: VerificationMode>(
         .into_iter()
         .flat_map(|tx| {
             let tx_hash = tx.hash();
-            tx.op_refs_iter()
-                .zip(tx.op_proof_refs_iter())
+            ops_with_proofs(&tx)
                 .filter_map(|(op, proof)| {
                     op_to_zone_message(op, proof, tx_hash, channel_id, deposit_events)
                 })

@@ -93,14 +93,15 @@ impl SequencerClient {
         Self::recv(response_rx).await?
     }
 
-    /// Async counterpart of [`super::SequencerHandle::publish_prepared`].
-    pub async fn publish_prepared(
+    /// Async counterpart of
+    /// [`super::SequencerHandle::submit_prepared_inscription`].
+    pub async fn submit_prepared_inscription(
         &self,
         op: InscriptionOp,
         step_proofs: Vec<StepProof>,
     ) -> Result<PublishReceipt, Error> {
         let (response_tx, response_rx) = oneshot::channel();
-        self.send(ActorRequest::PublishPrepared {
+        self.send(ActorRequest::SubmitPreparedInscription {
             op: Box::new(op),
             step_proofs,
             response_tx,

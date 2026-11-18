@@ -178,7 +178,7 @@ pub(super) enum ActorRequest {
         mini_blocks: MiniBlocks,
         response_tx: oneshot::Sender<Result<InscriptionOp, Error>>,
     },
-    PublishPrepared {
+    SubmitPreparedInscription {
         op: Box<InscriptionOp>,
         step_proofs: Vec<StepProof>,
         response_tx: oneshot::Sender<Result<PublishReceipt, Error>>,
@@ -610,12 +610,12 @@ where
             } => {
                 drop(response_tx.send(self.do_prepare_inscription(data, mini_blocks)));
             }
-            ActorRequest::PublishPrepared {
+            ActorRequest::SubmitPreparedInscription {
                 op,
                 step_proofs,
                 response_tx,
             } => {
-                drop(response_tx.send(self.do_publish_prepared(*op, step_proofs).await));
+                drop(response_tx.send(self.do_submit_prepared_inscription(*op, step_proofs).await));
             }
             ActorRequest::ChannelConfig {
                 keys,
@@ -750,7 +750,8 @@ where
     /// (called from outside the drive task via [`SequencerClient`]).
     pub(super) async fn do_publish(&mut self, data: Inscription) -> Result<PublishReceipt, Error> {
         let prepared = self.do_prepare_inscription(data, MiniBlocks::default())?;
-        self.do_publish_prepared(prepared, Vec::new()).await
+        self.do_submit_prepared_inscription(prepared, Vec::new())
+            .await
     }
 
     pub(super) fn do_prepare_inscription(
@@ -768,7 +769,7 @@ where
         ))
     }
 
-    pub(super) async fn do_publish_prepared(
+    pub(super) async fn do_submit_prepared_inscription(
         &mut self,
         op: InscriptionOp,
         step_proofs: Vec<StepProof>,
@@ -785,7 +786,7 @@ where
         let data = op.inscription.clone();
         let steps = InscriptionSteps {
             mini_blocks: op.mini_blocks.clone(),
-            proofs: step_proofs.clone(),
+            proofs: step_proofs.as_slice().into(),
         };
         let (signed_tx, pre_fund) = create_inscribe_tx(
             &self.node,

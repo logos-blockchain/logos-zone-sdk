@@ -496,7 +496,7 @@ fn sample_steps() -> InscriptionSteps {
 }
 
 #[tokio::test]
-async fn publish_prepared_carries_the_steps_and_their_proofs() {
+async fn submit_prepared_inscription_carries_the_steps_and_their_proofs() {
     let mut sequencer = ready_sequencer_with_channel(
         Some(single_key_channel_state()),
         Ed25519Key::from_bytes(&[0; 32]),
@@ -513,7 +513,7 @@ async fn publish_prepared_carries_the_steps_and_their_proofs() {
         .expect("a ready sequencer prepares an inscription");
     let (result, checkpoint) = sequencer
         .handle()
-        .publish_prepared(prepared.clone(), steps.proofs.clone())
+        .submit_prepared_inscription(prepared.clone(), steps.proofs.to_vec())
         .await
         .expect("a prepared inscription with fitting proofs is published");
 
@@ -529,7 +529,7 @@ async fn publish_prepared_carries_the_steps_and_their_proofs() {
 }
 
 #[tokio::test]
-async fn publish_prepared_refuses_misfit_proofs_and_a_moved_tip() {
+async fn submit_prepared_inscription_refuses_misfit_proofs_and_a_moved_tip() {
     let mut sequencer = ready_sequencer_with_channel(
         Some(single_key_channel_state()),
         Ed25519Key::from_bytes(&[0; 32]),
@@ -548,7 +548,7 @@ async fn publish_prepared_refuses_misfit_proofs_and_a_moved_tip() {
     assert!(matches!(
         sequencer
             .handle()
-            .publish_prepared(prepared.clone(), missing_one)
+            .submit_prepared_inscription(prepared.clone(), missing_one)
             .await,
         Err(Error::InvalidStepProofs(_))
     ));
@@ -556,7 +556,7 @@ async fn publish_prepared_refuses_misfit_proofs_and_a_moved_tip() {
     assert!(matches!(
         sequencer
             .handle()
-            .publish_prepared(prepared.clone(), wrong_kinds)
+            .submit_prepared_inscription(prepared.clone(), wrong_kinds)
             .await,
         Err(Error::InvalidStepProofs(_))
     ));
@@ -569,7 +569,7 @@ async fn publish_prepared_refuses_misfit_proofs_and_a_moved_tip() {
     assert!(matches!(
         sequencer
             .handle()
-            .publish_prepared(prepared, steps.proofs)
+            .submit_prepared_inscription(prepared, steps.proofs.to_vec())
             .await,
         Err(Error::ChannelStateChanged(_))
     ));

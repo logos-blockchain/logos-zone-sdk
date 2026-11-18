@@ -98,12 +98,14 @@ where
     }
 
     /// Enqueue a prepared inscription with one proof per step.
-    pub async fn publish_prepared(
+    pub async fn submit_prepared_inscription(
         &mut self,
         op: InscriptionOp,
         step_proofs: Vec<StepProof>,
     ) -> Result<PublishReceipt, Error> {
-        self.sequencer.do_publish_prepared(op, step_proofs).await
+        self.sequencer
+            .do_submit_prepared_inscription(op, step_proofs)
+            .await
     }
 
     /// Build an [`Ops`] for the given ops and an inscription message,
