@@ -90,6 +90,9 @@ where
 
     /// Build the inscription of `data` applying `mini_blocks` on the current
     /// publish tip, without publishing it.
+    ///
+    /// The returned op fixes the `op_id` the program step proofs bind. A
+    /// user step or program deposit binds its own id, not the `op_id`.
     pub fn prepare_inscription(
         &mut self,
         data: Inscription,
@@ -99,6 +102,15 @@ where
     }
 
     /// Enqueue a prepared inscription with one proof per step.
+    ///
+    /// The op is published as prepared: a stale re-fund replaces only the
+    /// fee inputs, so the `op_id` and every proof stay valid. The op is never
+    /// rebuilt silently. A publish tip that moved since
+    /// [`Self::prepare_inscription`] fails with [`Error::ChannelStateChanged`],
+    /// and an inscription that lands then drops off the canonical branch
+    /// comes back orphaned in a [`super::ChannelUpdate`] with its steps. Both
+    /// mean: prepare again, re-prove the program steps against the new
+    /// `op_id`, keep the holders' proofs, submit again.
     pub async fn submit_prepared_inscription(
         &mut self,
         op: InscriptionOp,

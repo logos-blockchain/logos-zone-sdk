@@ -111,9 +111,17 @@ pub mod node_types {
         mantle::{
             SignedOps, TxHash, Value,
             channel::ChannelState,
-            notes::{InputNullifiers, OutputCommitments, ProgramId},
-            ops::channel::{ChannelId, MsgId, deposit::Metadata, inscribe::Inscription},
-            programs::{ProgramVerificationKey, derive_program_id},
+            notes::{InputNullifiers, OutputCommitments, ProgramId, derive_program_output_nonce},
+            ops::{
+                OpId, ProgramNoteOpening,
+                channel::{
+                    ChannelId, MsgId,
+                    deposit::Metadata,
+                    inscribe::{Inscription, user_step_id},
+                    program_step::{program_deposit_id, program_deposits_hash},
+                },
+            },
+            programs::{ProgramVerificationKey, derive_program_id, program_step_id},
             transactions::states::Unverified,
         },
     };
