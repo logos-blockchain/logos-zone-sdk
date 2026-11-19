@@ -38,6 +38,7 @@ use super::{
     block_states::{ChannelTxKind, SharedTx},
     client::SequencerClient,
     handle::SequencerHandle,
+    program_steps::{MiniBlockSpec, ProgramInscription, build_program_inscription},
     slot_clock::SlotClock,
     state::{ParentTaken, TxState},
     tx_builder::{
@@ -183,6 +184,11 @@ pub(super) enum ActorRequest {
         data: Inscription,
         mini_blocks: MiniBlocks,
         response_tx: oneshot::Sender<Result<InscriptionOp, Error>>,
+    },
+    PrepareProgramInscription {
+        data: Inscription,
+        mini_blocks: Vec<MiniBlockSpec>,
+        response_tx: oneshot::Sender<Result<ProgramInscription, Error>>,
     },
     SubmitPreparedInscription {
         op: Box<InscriptionOp>,
@@ -646,6 +652,13 @@ where
             } => {
                 drop(response_tx.send(self.do_prepare_inscription(data, mini_blocks)));
             }
+            ActorRequest::PrepareProgramInscription {
+                data,
+                mini_blocks,
+                response_tx,
+            } => {
+                drop(response_tx.send(self.do_prepare_program_inscription(data, mini_blocks)));
+            }
             ActorRequest::SubmitPreparedInscription {
                 op,
                 step_proofs,
@@ -812,6 +825,34 @@ where
             self.compute_publish_parent(),
             mini_blocks,
         ))
+    }
+
+    /// Builds the inscription of `data` with `mini_blocks` on the current
+    /// publish tip, its program steps spending the channel's program notes
+    /// at the root they name: the set
+    /// [`PROGRAM_SPEND_ROOT_DEPTH`](super::block_states::PROGRAM_SPEND_ROOT_DEPTH)
+    /// blocks below the tip, minus what the pending inscriptions already
+    /// spend.
+    pub(super) fn do_prepare_program_inscription(
+        &self,
+        data: Inscription,
+        mini_blocks: Vec<MiniBlockSpec>,
+    ) -> Result<ProgramInscription, Error> {
+        self.ensure_ready()?;
+        // Safe to unwrap — `ensure_ready` checks state.
+        let spend = self
+            .state
+            .as_ref()
+            .unwrap()
+            .program_spend_set(self.current_tip);
+        build_program_inscription(
+            self.channel_id,
+            &self.signing_key,
+            data,
+            self.compute_publish_parent(),
+            &spend,
+            mini_blocks,
+        )
     }
 
     pub(super) async fn do_submit_prepared_inscription(

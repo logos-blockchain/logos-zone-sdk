@@ -2595,6 +2595,174 @@ async fn a_checkpoint_without_program_notes_rebuilds_the_set_from_the_finalized_
     assert!(note.path.verify::<ZkHasher>(commitment.0, view.root));
 }
 
+/// A program inscription prepared at the tip spends the program notes the
+/// sequencer tracks `PROGRAM_SPEND_ROOT_DEPTH` blocks below it, its first
+/// mini-block proven against the root on chain, and once submitted its
+/// inputs leave the notes a next step may consume.
+#[tokio::test]
+#[expect(clippy::too_many_lines, reason = "Test function.")]
+async fn prepare_program_inscription_spends_the_tracked_notes_and_submits() {
+    use std::collections::HashMap;
+
+    use lb_core::{
+        events::{BlockEvent, Event as ChainEvent, Events},
+        mantle::{
+            note_set::{NoteSetIndex, NoteSetUpdate},
+            ops::{
+                channel::{
+                    inscribe::{MiniBlock, MiniBlocks, Step},
+                    program_step::ProgramStep,
+                },
+                proof_program_step::StepProofShape,
+            },
+        },
+    };
+    use lb_key_management_system_service::keys::ZkPublicKey;
+
+    use crate::{
+        sequencer::{
+            ProgramStepSpec, StepSpec, UserOutput,
+            block_states::PROGRAM_SPEND_ROOT_DEPTH,
+            program_notes::fixtures::{foreign, program, sample_opening},
+        },
+        test_support::{inscribe_op, unverified_tx_with_ops},
+    };
+
+    let channel_id = ChannelId::from([0; 32]);
+    let sequencer_key = Ed25519Key::from_bytes(&[0; 32]);
+    let opening = sample_opening();
+    let commitment = opening.note(program()).commitment();
+    let step = ProgramStep {
+        program_id: program(),
+        program_outputs: [commitment].into(),
+        ..ProgramStep::sample()
+    };
+    let mut mined = inscribe_op(channel_id, MsgId::root(), b"step");
+    mined.mini_blocks = MiniBlocks::from([MiniBlock::try_from(vec![Step::Program(step)]).unwrap()]);
+    let b1 = api_block(
+        1,
+        0,
+        1,
+        vec![unverified_tx_with_ops(vec![Op::ChannelInscribe(
+            mined.clone(),
+        )])],
+    );
+    let update = Events::from(ChainEvent::Block(BlockEvent::NoteSetUpdated(
+        NoteSetUpdate {
+            note_set: NoteSetIndex::Channel(channel_id),
+            nullifiers: vec![],
+            commitments: vec![foreign(1), commitment],
+        },
+    )));
+    // B1 creates the note; the empty blocks after it bring it to spend depth.
+    let blocks: Vec<_> = (2..=1 + PROGRAM_SPEND_ROOT_DEPTH as u8)
+        .map(|n| api_block(n, n - 1, u64::from(n), vec![]))
+        .collect();
+    let (mut node, _posted) = MockNode::with_posted_channel();
+    node.channel_state = Some(single_key_channel_state());
+    node.scripts = scripts(vec![StreamScript {
+        events: std::iter::once(&b1)
+            .chain(&blocks)
+            .map(live_event)
+            .collect(),
+        then: StreamEnd::Hang,
+    }]);
+    node.events = HashMap::from([(header_id(1), update)]);
+    let mut sequencer =
+        ZoneSequencer::init(channel_id, sequencer_key, node, funding_config(), None);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let event = tokio::time::timeout_at(deadline, sequencer.next_event())
+            .await
+            .expect("the sequencer gets ready");
+        if matches!(event, Event::Ready) {
+            break;
+        }
+    }
+    let mut processed = 0;
+    while processed <= blocks.len() {
+        let event = tokio::time::timeout_at(deadline, sequencer.next_event())
+            .await
+            .expect("every block is processed");
+        if matches!(event, Event::BlocksProcessed { .. }) {
+            processed += 1;
+        }
+    }
+    let view = sequencer.handle().program_notes();
+    assert_eq!(view.unfinalized.len(), 1, "the note is tracked at the tip");
+
+    let payee = ZkPublicKey::new(Fr::from(5u64));
+    let built = sequencer
+        .handle()
+        .prepare_program_inscription(
+            Inscription::new_unchecked(b"zone block".to_vec()),
+            vec![vec![StepSpec::Program(ProgramStepSpec {
+                program_id: program(),
+                inputs: vec![commitment],
+                program_outputs: vec![],
+                outputs: vec![UserOutput {
+                    public_key: payee,
+                    value: opening.value,
+                }],
+                inscription: Inscription::new_unchecked(b"spend".to_vec()),
+            })]],
+        )
+        .expect("a ready sequencer builds the program step on its tracked note");
+    assert_eq!(
+        built.op.parent,
+        mined.id(),
+        "chains on the mined inscription"
+    );
+    let draft = built
+        .program_steps()
+        .next()
+        .expect("the inscription has a program step");
+    assert_eq!(
+        draft.witness.chain.tx_commitment_root, view.root,
+        "a first mini-block is proven against the root on chain"
+    );
+    assert_eq!(draft.outputs[0].public_key, payee);
+
+    let StepProof::ProgramStep(sample) =
+        StepProof::sample_for(StepProofShape::ProgramStep { program_notes: 0 })
+    else {
+        panic!("a program step shape samples a program step proof");
+    };
+    let proofs = built
+        .step_proofs(vec![(sample.spend_proof, sample.program_proof)])
+        .unwrap();
+    let (result, _checkpoint) = sequencer
+        .handle()
+        .submit_prepared_inscription(built.op.clone(), proofs)
+        .await
+        .expect("the built inscription submits with its proofs");
+    assert_eq!(result.tx.inscription().this_msg, built.op.id());
+    assert_eq!(
+        sequencer.handle().program_notes().unfinalized,
+        [],
+        "the pending step spends the note"
+    );
+    assert!(
+        matches!(
+            sequencer.handle().prepare_program_inscription(
+                Inscription::new_unchecked(b"again".to_vec()),
+                vec![vec![StepSpec::Program(ProgramStepSpec {
+                    program_id: program(),
+                    inputs: vec![commitment],
+                    program_outputs: vec![],
+                    outputs: vec![UserOutput {
+                        public_key: payee,
+                        value: opening.value,
+                    }],
+                    inscription: Inscription::new_unchecked(b"spend".to_vec()),
+                })]],
+            ),
+            Err(Error::InvalidProgramStep(_))
+        ),
+        "a note a pending step spends is not spendable again"
+    );
+}
+
 /// The config op's signature must claim our key's index in the *current*
 /// accredited list — not index 0 — or the ledger rejects the update as
 /// `InvalidSignature` whenever the sequencer is not the leading key.

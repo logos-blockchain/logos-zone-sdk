@@ -5061,6 +5061,7 @@ dependencies = [
 name = "logos-blockchain-zone-sdk"
 version = "0.0.0"
 dependencies = [
+ "ark-ff",
  "async-trait",
  "blockchain-test-logos",
  "futures",
@@ -5073,6 +5074,7 @@ dependencies = [
  "logos-blockchain-key-management-system-service",
  "logos-blockchain-log-targets",
  "logos-blockchain-mmr",
+ "logos-blockchain-program-spend",
  "logos-blockchain-time",
  "reqwest 0.12.28",
  "rpds",

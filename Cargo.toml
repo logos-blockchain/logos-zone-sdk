@@ -16,6 +16,7 @@ repository  = "https://github.com/logos-blockchain/logos-zone-sdk"
 version     = "0.0.0"
 
 [workspace.dependencies]
+ark-ff                           = { default-features = false, version = "0.5" }
 async-trait                      = { default-features = false, version = "0.1" }
 bincode                          = { default-features = false, version = "1.3" }
 blake2                           = { default-features = false, version = "0.10" }
@@ -32,6 +33,7 @@ lb-http-api-common               = { default-features = false, git = "https://gi
 lb-key-management-system-service = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-key-management-system-service", rev = "a54cbc526112d391f11901e7b284e1bbe5d801b8" }
 lb-log-targets                   = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-log-targets", rev = "a54cbc526112d391f11901e7b284e1bbe5d801b8" }
 lb-mmr                           = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-mmr", rev = "a54cbc526112d391f11901e7b284e1bbe5d801b8" }
+lb-program-spend                 = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-program-spend", rev = "a54cbc526112d391f11901e7b284e1bbe5d801b8" }
 lb-testing-framework             = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "blockchain-test-logos", rev = "a54cbc526112d391f11901e7b284e1bbe5d801b8" }
 lb-time                          = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-time", rev = "a54cbc526112d391f11901e7b284e1bbe5d801b8" }
 lb-utils                         = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-utils", rev = "a54cbc526112d391f11901e7b284e1bbe5d801b8" }

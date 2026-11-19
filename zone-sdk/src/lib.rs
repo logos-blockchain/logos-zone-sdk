@@ -22,6 +22,16 @@
 //! [`adapter::Node`] trait; an HTTP implementation is provided as
 //! [`adapter::NodeHttpClient`].
 //!
+//! An inscription carrying program steps is built with
+//! [`sequencer::SequencerHandle::prepare_program_inscription`]: the sequencer
+//! tracks the channel's program notes
+//! ([`sequencer::SequencerHandle::program_notes`]) and builds each program
+//! step on them, with the witness of its spend. The spend is proven with
+//! [`sequencer::prove_program_step`], off the drive loop; the zone adds its
+//! program proof and publishes the inscription with
+//! [`sequencer::SequencerHandle::submit_prepared_inscription`] and
+//! [`sequencer::ProgramInscription::step_proofs`].
+//!
 //! # Quick start (sequencer)
 //!
 //! The sequencer is owned by a single drive task. Two command surfaces:
@@ -109,7 +119,7 @@ pub mod node_types {
         crypto::Hash,
         header::HeaderId,
         mantle::{
-            SignedOps, TxHash, Value,
+            Note, SignedOps, TxHash, Value,
             channel::ChannelState,
             note_set::CommitmentMmr,
             notes::{
@@ -117,22 +127,30 @@ pub mod node_types {
                 derive_program_output_nonce,
             },
             ops::{
-                OpId, ProgramNoteOpening,
+                OpId, ProgramNoteOpening, StepProof,
                 channel::{
                     ChannelId, MsgId,
                     deposit::Metadata,
-                    inscribe::{Inscription, user_step_id},
-                    program_step::{program_deposit_id, program_deposits_hash},
+                    inscribe::{
+                        Inscription, InscriptionOp, MiniBlock, MiniBlocks, Step, UserStep,
+                        user_step_id,
+                    },
+                    program_step::{
+                        ProgramDeposit, ProgramStep, program_deposit_id, program_deposits_hash,
+                    },
                 },
+                proof_program_step::{ProgramProof, ProgramStepProof, ZkProgramSpendProof},
             },
             programs::{ProgramVerificationKey, derive_program_id, program_step_id},
             transactions::states::Unverified,
         },
     };
+    pub use lb_groth16::Fr;
     pub use lb_http_api_common::bodies::{
         mantle::LimitsResponseBody,
         wallet::fund::{WalletFundRequestBody, WalletFundResponseBody},
     };
+    pub use lb_key_management_system_service::keys::ZkPublicKey;
     pub use lb_mmr::MerklePath;
 }
 

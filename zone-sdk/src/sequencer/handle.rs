@@ -18,6 +18,7 @@ use lb_core::{
 use lb_key_management_system_service::keys::Ed25519Signature;
 
 use super::{
+    program_steps::{MiniBlockSpec, ProgramInscription},
     types::{
         Error, PreparedChannelConfig, ProgramNotesView, ProgramRegisterInfo, SequencerCheckpoint,
     },
@@ -101,6 +102,23 @@ where
         mini_blocks: MiniBlocks,
     ) -> Result<InscriptionOp, Error> {
         self.sequencer.do_prepare_inscription(data, mini_blocks)
+    }
+
+    /// Build the inscription of `data` with `mini_blocks` on the current
+    /// publish tip, its program steps spending the channel's program notes
+    /// and carrying the witness of their spend, without publishing it. The
+    /// spends are proven with [`super::prove_program_step`], off the drive
+    /// loop, and the inscription is published with
+    /// [`Self::submit_prepared_inscription`] and
+    /// [`ProgramInscription::step_proofs`]. Async counterpart:
+    /// [`super::SequencerClient::prepare_program_inscription`].
+    pub fn prepare_program_inscription(
+        &mut self,
+        data: Inscription,
+        mini_blocks: Vec<MiniBlockSpec>,
+    ) -> Result<ProgramInscription, Error> {
+        self.sequencer
+            .do_prepare_program_inscription(data, mini_blocks)
     }
 
     /// Enqueue a prepared inscription with one proof per step.

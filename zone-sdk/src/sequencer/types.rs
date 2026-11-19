@@ -388,6 +388,15 @@ pub enum Error {
     /// would reject the registration. Not recoverable by retrying.
     #[error("program key rejected: {0}")]
     InvalidProgramKey(String),
+    /// A program step cannot be built as specified: it consumes a note the
+    /// sequencer does not hold spendable, its values do not balance, or
+    /// its mini-block breaks the ledger's rules. Not recoverable by
+    /// retrying.
+    #[error("program step rejected: {0}")]
+    InvalidProgramStep(String),
+    /// The `ZkProgramSpend` prover failed.
+    #[error("prover error: {0}")]
+    Prover(String),
 }
 
 /// Events emitted by the sequencer.
