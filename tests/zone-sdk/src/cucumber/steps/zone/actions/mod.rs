@@ -123,7 +123,9 @@ pub(super) use channel::{
 pub(super) use cluster::{
     register_zone_sequencers_with_shared_key, start_nodes_with_zone_resources,
 };
-pub(super) use program::register_zone_program;
+pub(super) use program::{
+    publish_program_step, register_zone_program, wait_for_tracked_program_notes,
+};
 pub(super) use publishing::{
     initialize_zone_indexer, publish_zone_messages, publish_zone_messages_concurrently,
 };

@@ -17,12 +17,13 @@ use logos_blockchain_tests::{
 use super::{
     CustomRepublishDeps, PublishDeadline,
     actions::{
-        DriveMode, initialize_zone_indexer, prepare_zone_channel_config, publish_zone_messages,
-        publish_zone_messages_concurrently, register_zone_program,
+        DriveMode, initialize_zone_indexer, prepare_zone_channel_config, publish_program_step,
+        publish_zone_messages, publish_zone_messages_concurrently, register_zone_program,
         register_zone_sequencers_with_shared_key, remember_published_zone_message,
         save_zone_checkpoint, sign_prepared_zone_channel_config, start_named_sequencer,
         start_named_sequencer_with_pending_submit_depth, start_nodes_with_zone_resources,
         stop_zone_sequencer, submit_prepared_zone_channel_config, submit_zone_channel_config,
+        wait_for_tracked_program_notes,
     },
     assertions::{
         assert_sorted_outcome, scan_indexer_for_payloads, wait_for_indexer_unordered,

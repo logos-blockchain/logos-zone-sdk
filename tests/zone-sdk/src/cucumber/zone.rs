@@ -4,7 +4,10 @@ use std::{
 };
 
 use lb_core::{
-    mantle::ops::channel::{ChannelId, MsgId, inscribe::Inscription},
+    mantle::{
+        notes::NoteCommitment,
+        ops::channel::{ChannelId, MsgId, inscribe::Inscription},
+    },
     proofs::channel_multi_sig_proof::IndexedSignatures,
 };
 use lb_key_management_system_service::keys::{Ed25519Key, Ed25519PublicKey};
@@ -16,6 +19,14 @@ use super::steps::zone::runner::{
     Event, IndexedSignature, InscriptionId, PreparedChannelConfig, ProgramRegisterInfo,
     SequencerCheckpoint, SequencerClient,
 };
+
+/// A program a sequencer registered: the registration and the seed of the
+/// toy circuit whose key it registered, which proves its steps.
+#[derive(Debug, Clone)]
+pub struct ZoneProgram {
+    pub info: ProgramRegisterInfo,
+    pub circuit_seed: u64,
+}
 
 pub struct ZonePublishedMessage {
     pub payload: Inscription,
@@ -87,7 +98,9 @@ pub struct ZoneState {
     latest_checkpoints: HashMap<String, SequencerCheckpoint>,
     prepared_configs: HashMap<String, PreparedChannelConfig>,
     prepared_config_signatures: HashMap<String, IndexedSignatures>,
-    programs: HashMap<String, ProgramRegisterInfo>,
+    programs: HashMap<String, ZoneProgram>,
+    /// The notes the program step of a published zone block created.
+    program_outputs: HashMap<String, Vec<NoteCommitment>>,
     sequencer_startups: HashMap<String, ZoneSequencerStartup>,
     sorted_total_payloads: Option<usize>,
     sorted_expected_by_sequencer: Option<HashMap<String, Vec<Inscription>>>,
@@ -346,14 +359,27 @@ impl ZoneState {
         self.prepared_configs.insert(alias, prepared);
     }
 
-    pub fn remember_program(&mut self, alias: String, program: ProgramRegisterInfo) {
+    pub fn remember_program(&mut self, alias: String, program: ZoneProgram) {
         self.programs.insert(alias, program);
     }
 
-    pub fn program(&self, alias: &str) -> Result<&ProgramRegisterInfo, StepError> {
+    pub fn program(&self, alias: &str) -> Result<&ZoneProgram, StepError> {
         self.programs.get(alias).ok_or(StepError::LogicalError {
             message: format!("Zone program '{alias}' not found"),
         })
+    }
+
+    pub fn remember_program_outputs(&mut self, block_alias: String, outputs: Vec<NoteCommitment>) {
+        self.program_outputs.insert(block_alias, outputs);
+    }
+
+    pub fn program_outputs(&self, block_alias: &str) -> Result<&[NoteCommitment], StepError> {
+        self.program_outputs
+            .get(block_alias)
+            .map(Vec::as_slice)
+            .ok_or(StepError::LogicalError {
+                message: format!("Zone block '{block_alias}' published no program step"),
+            })
     }
 
     pub fn prepared_config(&self, alias: &str) -> Result<&PreparedChannelConfig, StepError> {
@@ -656,6 +682,7 @@ impl ZoneState {
         self.latest_checkpoints.clear();
         self.prepared_configs.clear();
         self.programs.clear();
+        self.program_outputs.clear();
         self.prepared_config_signatures.clear();
         self.expected_custom_payloads.clear();
         self.view_violations.clear();
