@@ -1,5 +1,5 @@
 [workspace]
-members  = ["logos_sql", "zone-sdk"]
+members  = ["logos_sql", "tests/logos-sql", "tests/zone-sdk", "zone-sdk"]
 resolver = "2"
 
 [workspace.package]
@@ -50,6 +50,12 @@ time                             = { default-features = false, version = "0.3" }
 tokio                            = { default-features = false, version = "1" }
 tracing                          = { default-features = false, version = "0.1" }
 zeroize                          = { default-features = false, version = "1" }
+
+# The node's test harness runs its zone and Logos SQL suites against the
+# libraries of this repository instead of the node's own copies.
+[patch."https://github.com/logos-blockchain/logos-blockchain.git"]
+logos-blockchain-zone-sdk = { path = "zone-sdk" }
+logos-sql                 = { path = "logos_sql" }
 
 [profile.release]
 codegen-units = 1     # (Much) slower build time, much better performances

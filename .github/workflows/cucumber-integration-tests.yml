@@ -54,26 +54,26 @@ jobs:
         with:
           ref: ${{ github.sha }}
 
-      # Every node crate in `Cargo.toml` is pinned to one revision; the node
+      # Every node crate in `Cargo.toml` is pinned to one release tag; the node
       # binary must come from the same one.
-      - name: Read the pinned node revision
+      - name: Read the pinned node release
         id: node
         run: |
-          rev="$(sed -nE 's/^lb-core += \{.*rev = "([0-9a-f]{40})".*$/\1/p' Cargo.toml)"
-          if [ -z "$rev" ]; then
-            echo "could not read the pinned node revision from Cargo.toml" >&2
+          tag="$(sed -nE 's/^lb-core += \{.*tag = "([^"]+)".*$/\1/p' Cargo.toml)"
+          if [ -z "$tag" ]; then
+            echo "could not read the pinned node release from Cargo.toml" >&2
             exit 1
           fi
-          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       # `--features testing` matches the node harness's own node build.
-      - name: Build the node binary at the pinned revision
+      - name: Build the node binary at the pinned release
         env:
           CARGO_INCREMENTAL: 0  # Disable incremental compilation
         run: >-
           cargo install --locked
           --git https://github.com/logos-blockchain/logos-blockchain.git
-          --rev "${{ steps.node.outputs.rev }}"
+          --tag "${{ steps.node.outputs.tag }}"
           --features testing
           --target-dir target/node-target
           --root target/node
@@ -81,6 +81,13 @@ jobs:
 
       - name: Build the password manager example
         run: cargo build --locked -p logos-sql --example password_manager
+
+      # The node harness at the pinned release starts the password manager
+      # without an encryption key, which the example here requires.
+      - name: Create the password manager encryption key
+        run: |
+          head -c 32 /dev/urandom > "$RUNNER_TEMP/password-manager.key"
+          echo "LOGOS_SQL_ENCRYPTION_KEY_FILE=$RUNNER_TEMP/password-manager.key" >> "$GITHUB_ENV"
 
       # Special exclusion tags, as in the node repository (we want to run the rest of the tests and not fail the workflow):
       # - @broken = tests that are broken and must still be fixed
