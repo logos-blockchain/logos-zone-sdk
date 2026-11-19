@@ -4,7 +4,7 @@ use super::{
     start_node, start_nodes_order_respecting_dependencies, warn,
 };
 
-pub(in super::super) fn register_zone_sequencers_with_shared_key(
+pub fn register_zone_sequencers_with_shared_key(
     world: &mut ZoneWorld,
     source_alias: &str,
     aliases: Vec<String>,
@@ -18,7 +18,7 @@ pub(in super::super) fn register_zone_sequencers_with_shared_key(
     Ok(())
 }
 
-pub(in super::super) async fn start_nodes_with_zone_resources(
+pub async fn start_nodes_with_zone_resources(
     world: &mut ZoneWorld,
     step: &Step,
     rows: Vec<ZoneNodeResourcesRow>,

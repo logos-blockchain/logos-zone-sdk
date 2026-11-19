@@ -9,7 +9,7 @@ use super::{
     start_sorted_conflict_policy, timeout, wait_for_height,
 };
 
-pub(in super::super) async fn start_named_sequencer(
+pub async fn start_named_sequencer(
     world: &mut ZoneWorld,
     step: &Step,
     sequencer_alias: impl AsRef<str>,
@@ -39,7 +39,7 @@ fn sequencer_funding(world: &ZoneWorld, sequencer_alias: &str) -> Result<Funding
     })
 }
 
-pub(in super::super) async fn start_named_sequencer_with_pending_submit_depth(
+pub async fn start_named_sequencer_with_pending_submit_depth(
     world: &mut ZoneWorld,
     step: &Step,
     sequencer_alias: impl AsRef<str>,

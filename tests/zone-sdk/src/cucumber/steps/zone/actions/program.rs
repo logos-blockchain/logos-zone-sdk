@@ -8,7 +8,7 @@ use super::{
 /// Registers the node's sample program key through the sequencer and
 /// remembers the registration under `program_alias`, its tx under the same
 /// alias.
-pub(in super::super) async fn register_zone_program(
+pub async fn register_zone_program(
     world: &mut ZoneWorld,
     step: &Step,
     sequencer_alias: &str,
