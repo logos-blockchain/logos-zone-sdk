@@ -6,7 +6,7 @@ use std::{
 };
 
 use blake2::{Blake2b, Digest as _, digest::consts::U32};
-use lb_binary_codec::canonical::{BinaryDecode, BinaryEncode};
+use lb_binary_codec::canonical::{BinaryCodec, BinaryDecode, BinaryEncode as _};
 use lb_utils::bounded::{NonEmptyBoundedVec, UpperBoundedVec};
 use rand::RngCore as _;
 use rusqlite::types::{ToSql, ToSqlOutput, Value};
@@ -31,7 +31,7 @@ pub const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_BATCH_WRITES: usize = u16::MAX as usize;
 
 /// Stable identity of one application write.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, BinaryEncode, BinaryDecode)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, BinaryCodec)]
 pub struct TxId([u8; 32]);
 
 impl Display for TxId {
@@ -131,7 +131,7 @@ impl SqlParameter {
 }
 
 /// One parameterized SQL statement.
-#[derive(Clone, Debug, PartialEq, BinaryEncode, BinaryDecode)]
+#[derive(Clone, Debug, PartialEq, BinaryCodec)]
 pub struct Statement {
     sql: SqlText,
     params: UpperBoundedVec<SqlParameter, MAX_BODY_BYTES>,
@@ -166,7 +166,7 @@ impl Statement {
 }
 
 /// Statements applied atomically at one channel position.
-#[derive(Clone, Debug, PartialEq, BinaryEncode, BinaryDecode)]
+#[derive(Clone, Debug, PartialEq, BinaryCodec)]
 pub struct Transaction {
     statements: NonEmptyBoundedVec<Statement, MAX_BODY_BYTES>,
 }
@@ -214,7 +214,7 @@ pub enum CapturedFunction {
 }
 
 /// One captured `SQLite` function call and the value returned locally.
-#[derive(Clone, Debug, PartialEq, BinaryEncode, BinaryDecode)]
+#[derive(Clone, Debug, PartialEq, BinaryCodec)]
 pub struct CapturedFunctionCall {
     pub function: CapturedFunction,
     pub result: SqlParameter,
@@ -230,7 +230,7 @@ impl CapturedFunctionCall {
 }
 
 /// Function results captured while executing one replicated transaction.
-#[derive(Clone, Debug, PartialEq, BinaryEncode, BinaryDecode)]
+#[derive(Clone, Debug, PartialEq, BinaryCodec)]
 pub struct CapturedFunctionCalls {
     calls: UpperBoundedVec<CapturedFunctionCall, MAX_BODY_BYTES>,
 }
@@ -254,7 +254,7 @@ impl CapturedFunctionCalls {
 }
 
 /// One independently applied transaction within a channel inscription.
-#[derive(Clone, Debug, PartialEq, BinaryEncode, BinaryDecode)]
+#[derive(Clone, Debug, PartialEq, BinaryCodec)]
 pub struct ChannelWrite {
     pub tx_id: TxId,
     pub transaction: Transaction,
@@ -288,7 +288,7 @@ impl ChannelWrite {
 }
 
 /// Ordered transactions sharing one publication, not one SQL transaction.
-#[derive(Clone, Debug, PartialEq, BinaryEncode, BinaryDecode)]
+#[derive(Clone, Debug, PartialEq, BinaryCodec)]
 pub struct ChannelBatch {
     writes: NonEmptyBoundedVec<ChannelWrite, MAX_BATCH_WRITES>,
 }

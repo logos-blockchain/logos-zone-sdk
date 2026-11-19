@@ -774,7 +774,7 @@ mod tests {
             tx_hash: TxHash::from([byte; 32]),
             parent_msg: MsgId::root(),
             this_msg: MsgId::from([byte; 32]),
-            payload: Inscription::new_unchecked(payload.to_vec()),
+            payload: Inscription::try_from(payload.to_vec()).unwrap(),
             signer: Some(UnverifiedEd25519PublicKey::from_bytes(&[0u8; 32]).unwrap()),
         }
     }

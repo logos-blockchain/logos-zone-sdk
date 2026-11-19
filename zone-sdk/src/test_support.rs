@@ -1,8 +1,7 @@
 //! Configurable [`adapter::Node`] mock and shared builders for unit tests.
 
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
-    num::NonZero,
+    collections::{HashMap, VecDeque},
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -12,11 +11,10 @@ use std::{
 use async_trait::async_trait;
 use futures::StreamExt as _;
 use lb_common_http_client::{
-    ApiBlock, ApiHeader, BlockInfo, ChainServiceInfo, CryptarchiaInfo, EraTiming, Events, PhaseTag,
+    ApiBlock, ApiHeader, BlockInfo, ChainServiceInfo, CryptarchiaInfo, Events, PhaseTag,
     ProcessedBlockEvent, Slot, State, TimeInfo,
 };
 use lb_core::{
-    era::ForkDigest,
     events::{DepositNote, Event as ChainEvent, TxEvent, TxEventPayload},
     header::{ContentId, HeaderId},
     mantle::{
@@ -33,15 +31,12 @@ use lb_core::{
             },
         },
         traits::Hashable as _,
-        transactions::{Ops, TxList, states::Unverified},
+        transactions::{Ops, states::Unverified},
     },
     proofs::leader_proof::Groth16LeaderProof,
 };
 use lb_groth16::Fr;
-use lb_http_api_common::bodies::{
-    mantle::LimitsResponseBody,
-    wallet::fund::{WalletFundRequestBody, WalletFundResponseBody},
-};
+use lb_http_api_common::bodies::wallet::fund::{WalletFundRequestBody, WalletFundResponseBody};
 use lb_key_management_system_service::keys::Ed25519Key;
 use tokio::sync::{mpsc, watch};
 
@@ -50,9 +45,6 @@ use crate::{
     adapter::{self, BoxStream},
     sequencer::FundingConfig,
 };
-
-/// The fork digest the transactions of the tests carry.
-pub const FORK_DIGEST: ForkDigest = ForkDigest::new([0x11; 32]);
 
 /// One scripted `block_stream` connection: serve `events`, then `then`.
 #[derive(Clone)]
@@ -116,11 +108,10 @@ pub struct MockNode {
     pub events: HashMap<HeaderId, Events>,
     /// Receives the priority-fee percentages from funding requests.
     pub funding_priority_fees: Option<mpsc::Sender<u64>>,
-    /// Served by `time_info()`: a single era from `genesis_time`, with slots
-    /// of `slot_duration` in epochs of `slots_per_epoch` slots.
-    pub slot_duration: core::time::Duration,
-    pub slots_per_epoch: NonZero<u64>,
-    pub genesis_time: time::UtcDateTime,
+    /// Served by `time_info()`.
+    pub slot_duration_ms: u64,
+    pub slots_per_epoch: u64,
+    pub genesis_time_unix_ms: i64,
 }
 
 impl Default for MockNode {
@@ -146,9 +137,9 @@ impl Default for MockNode {
             posted: None,
             events: HashMap::new(),
             funding_priority_fees: None,
-            slot_duration: core::time::Duration::from_secs(1),
-            slots_per_epoch: NonZero::new(1_000).unwrap(),
-            genesis_time: time::UtcDateTime::UNIX_EPOCH,
+            slot_duration_ms: 1_000,
+            slots_per_epoch: 1_000,
+            genesis_time_unix_ms: 0,
         }
     }
 }
@@ -195,24 +186,13 @@ impl adapter::Node for MockNode {
         })
     }
 
-    async fn limits(&self) -> Result<LimitsResponseBody, lb_common_http_client::Error> {
-        Ok(LimitsResponseBody {
-            max_op_data_size: u32::MAX,
-        })
-    }
-
     async fn time_info(&self) -> Result<TimeInfo, lb_common_http_client::Error> {
         Ok(TimeInfo {
-            genesis_time: self.genesis_time,
+            slot_duration_ms: self.slot_duration_ms,
+            genesis_time_unix_ms: self.genesis_time_unix_ms,
             current_slot: 0,
             current_epoch: 0,
-            era_timings: BTreeMap::from([(
-                0,
-                EraTiming {
-                    slot_duration: self.slot_duration,
-                    slots_per_epoch: self.slots_per_epoch,
-                },
-            )]),
+            slots_per_epoch: self.slots_per_epoch,
         })
     }
 
@@ -370,7 +350,7 @@ impl adapter::Node for MockNode {
         // node would at zero gas price.
         Ok(WalletFundResponseBody {
             tip: header_id(0),
-            funded_tx: request.tx_builder.build(FORK_DIGEST).map_err(|e| {
+            funded_tx: request.tx_builder.build().map_err(|e| {
                 lb_common_http_client::Error::Server(format!("mock funding failed: {e:?}"))
             })?,
             transfer_proof: None,
@@ -452,9 +432,7 @@ pub fn live_event(block: &ApiBlock) -> ProcessedBlockEvent {
 /// Build a `SignedOps` carrying the given ops, with sample proofs.
 /// Suitable for tests that only care about op extraction, not verification.
 pub fn unverified_tx_with_ops(ops: Vec<Op>) -> SignedOps<Unverified, StandardMode> {
-    let ops = TxList::try_from(ops)
-        .map(|ops| Ops::new(FORK_DIGEST, ops))
-        .expect("ops fit");
+    let ops = Ops::try_from(ops).expect("ops fit");
     SignedOps::from_ops_with_sample_proofs(ops)
 }
 

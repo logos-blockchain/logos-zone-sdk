@@ -1,5 +1,5 @@
 [workspace]
-members  = ["logos_sql", "tests/logos-sql", "tests/zone-sdk", "zone-sdk"]
+members  = ["logos_sql", "zone-sdk"]
 resolver = "2"
 
 [workspace.package]
@@ -29,8 +29,7 @@ lb-groth16                       = { default-features = false, git = "https://gi
 lb-http-api-common               = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-http-api-common", tag = "0.3.6" }
 lb-key-management-system-service = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-key-management-system-service", tag = "0.3.6" }
 lb-log-targets                   = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-log-targets", tag = "0.3.6" }
-lb-testing-framework = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "testing-framework", tag = "0.3.6" }
-lb-time                          = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-time", tag = "0.3.6" }
+lb-testing-framework             = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "testing-framework", tag = "0.3.6" }
 lb-utils                         = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-utils", tag = "0.3.6" }
 lb-zone-sdk                      = { default-features = false, package = "logos-blockchain-zone-sdk", path = "zone-sdk" }
 logos-blockchain-tests           = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", tag = "0.3.6" }

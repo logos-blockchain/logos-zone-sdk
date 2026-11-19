@@ -1,8 +1,6 @@
 use std::time::{Duration, Instant, SystemTime};
 
 use lb_common_http_client::Slot;
-use lb_time::era::EraTimingSchedule;
-use time::OffsetDateTime;
 
 /// Slack after a slot boundary so a wake-up lands inside the new slot; tokio
 /// timers tick at millisecond granularity.
@@ -10,25 +8,30 @@ const BOUNDARY_GRACE: Duration = Duration::from_millis(10);
 
 #[derive(Clone, Debug)]
 pub(super) struct SlotClock {
-    eras: EraTimingSchedule,
+    slot_duration: Duration,
+    chain_start_time: SystemTime,
     last_observed_slot: Slot,
     last_observed_at: Instant,
 }
 
 impl SlotClock {
-    pub(super) fn from_era_schedule(eras: EraTimingSchedule) -> Self {
-        let current_slot = slot_at(&eras, OffsetDateTime::now_utc());
+    pub(super) fn from_chain_start_time(
+        chain_start_time: SystemTime,
+        slot_duration: Duration,
+    ) -> Self {
+        let current_slot = slot_from_u64(
+            SystemTime::now()
+                .duration_since(chain_start_time)
+                .ok()
+                .map_or(0, |elapsed| slots_from_duration(elapsed, slot_duration)),
+        );
 
         Self {
-            eras,
+            slot_duration,
+            chain_start_time,
             last_observed_slot: current_slot,
             last_observed_at: Instant::now(),
         }
-    }
-
-    /// Moves the clock onto `eras`, keeping the slot it last observed and when.
-    pub(super) fn set_era_schedule(&mut self, eras: EraTimingSchedule) {
-        self.eras = eras;
     }
 
     pub(super) fn observe_slot(&mut self, observed_slot: Slot) {
@@ -37,18 +40,18 @@ impl SlotClock {
     }
 
     pub(super) fn current_slot(&self) -> Slot {
-        let from_chain_start = slot_at(&self.eras, OffsetDateTime::now_utc());
-        // The observed slot is taken to have started when it was observed.
-        let from_anchor = self
-            .eras
-            .checked_time_of(self.last_observed_slot)
-            .and_then(|observed| {
-                observed
-                    .checked_add(time::Duration::try_from(self.last_observed_at.elapsed()).ok()?)
-            })
-            .map_or(self.last_observed_slot, |now| slot_at(&self.eras, now));
+        let from_chain_start = SystemTime::now()
+            .duration_since(self.chain_start_time)
+            .ok()
+            .map_or(0, |elapsed| {
+                slots_from_duration(elapsed, self.slot_duration)
+            });
+        let from_anchor = slot_to_u64(self.last_observed_slot).saturating_add(slots_from_duration(
+            self.last_observed_at.elapsed(),
+            self.slot_duration,
+        ));
 
-        from_chain_start.max(from_anchor)
+        slot_from_u64(from_chain_start.max(from_anchor))
     }
 
     /// Sleep until [`Self::current_slot`] has reached `slot`; `None` if the
@@ -66,18 +69,17 @@ impl SlotClock {
     /// if it already has, `None` if it lies beyond what the clock can hold.
     fn instant_of(&self, slot: Slot) -> Option<Instant> {
         let now = Instant::now();
-        let start = self.eras.checked_time_of(slot)?;
+        let target = slot_to_u64(slot);
 
+        let slots_from_anchor = target.saturating_sub(slot_to_u64(self.last_observed_slot));
         let from_anchor = self
-            .eras
-            .checked_time_of(self.last_observed_slot)
-            .and_then(|observed| {
-                // A slot before the observed one is reached at the anchor.
-                let since_observed = Duration::try_from(start - observed).unwrap_or(Duration::ZERO);
-                self.last_observed_at.checked_add(since_observed)
-            });
+            .last_observed_at
+            .checked_add(duration_for_slots(slots_from_anchor, self.slot_duration));
 
-        let from_chain_start = Some(system_time_to_instant(SystemTime::from(start), now));
+        let from_chain_start = self
+            .chain_start_time
+            .checked_add(duration_for_slots(target, self.slot_duration))
+            .map(|at| system_time_to_instant(at, now));
 
         // `current_slot` takes the later of its two slot estimates, so the
         // slot is reached at the earlier of the two instants.
@@ -89,50 +91,45 @@ impl SlotClock {
     }
 }
 
-/// The slot in progress at `time`: the genesis slot before genesis.
-fn slot_at(eras: &EraTimingSchedule, time: OffsetDateTime) -> Slot {
-    eras.slot_at(time).unwrap_or(Slot::genesis())
-}
-
 fn system_time_to_instant(at: SystemTime, now: Instant) -> Instant {
     at.duration_since(SystemTime::now())
         .map_or(now, |until| now + until)
+}
+
+fn duration_for_slots(slots: u64, slot_duration: Duration) -> Duration {
+    let nanos = u128::from(slots) * slot_duration.as_nanos();
+    u64::try_from(nanos).map_or(Duration::MAX, Duration::from_nanos)
+}
+
+const fn slots_from_duration(elapsed: Duration, slot_duration: Duration) -> u64 {
+    let divisor = slot_duration.as_nanos();
+    if divisor == 0 {
+        return 0;
+    }
+    let slots = elapsed.as_nanos() / divisor;
+    if slots > u64::MAX as u128 {
+        u64::MAX
+    } else {
+        slots as u64
+    }
 }
 
 pub(super) const fn slot_to_u64(slot: Slot) -> u64 {
     slot.into_inner()
 }
 
+fn slot_from_u64(value: u64) -> Slot {
+    Slot::from(value)
+}
+
 #[cfg(test)]
 mod tests {
-    use std::num::NonZero;
-
-    use lb_time::era::{EraEntriesAfterGenesis, EraTiming};
-
     use super::*;
-
-    /// Eras starting at genesis `genesis`, slots of `slot_duration` in epochs
-    /// of 2 slots, then from `next` the slot duration paired with it.
-    fn eras(
-        genesis: OffsetDateTime,
-        slot_duration: Duration,
-        next: Option<(u32, Duration)>,
-    ) -> EraTimingSchedule {
-        let timing = |slot_duration| EraTiming {
-            slot_duration,
-            epoch_length: NonZero::new(2).unwrap(),
-        };
-        let after_genesis = next.map_or_else(EraEntriesAfterGenesis::empty, |(epoch, duration)| {
-            EraEntriesAfterGenesis::from((NonZero::new(epoch).unwrap(), timing(duration)))
-        });
-        EraTimingSchedule::new(genesis, timing(slot_duration), after_genesis).unwrap()
-    }
 
     #[test]
     fn instant_of_uses_the_earlier_of_anchor_and_chain_start() {
         let slot_duration = Duration::from_millis(100);
-        let mut clock =
-            SlotClock::from_era_schedule(eras(OffsetDateTime::now_utc(), slot_duration, None));
+        let mut clock = SlotClock::from_chain_start_time(SystemTime::now(), slot_duration);
         clock.observe_slot(Slot::from(10));
         let anchor = clock.last_observed_at;
 
@@ -143,28 +140,10 @@ mod tests {
         assert!(clock.instant_of(Slot::from(5)).unwrap() <= Instant::now());
     }
 
-    #[test]
-    fn instant_of_follows_the_slot_duration_of_each_era() {
-        // Slots of 100 ms until epoch 3, that is slot 6, then slots of 300 ms.
-        let mut clock = SlotClock::from_era_schedule(eras(
-            OffsetDateTime::now_utc(),
-            Duration::from_millis(100),
-            Some((3, Duration::from_millis(300))),
-        ));
-        clock.observe_slot(Slot::from(5));
-        let anchor = clock.last_observed_at;
-
-        // One slot of 100 ms, then two of 300 ms.
-        let at = clock.instant_of(Slot::from(8)).unwrap();
-        assert!(at >= anchor + Duration::from_millis(700));
-        assert!(at < anchor + Duration::from_millis(800));
-    }
-
     #[tokio::test]
     async fn sleep_until_a_reached_slot_does_not_wait() {
         let slot_duration = Duration::from_millis(100);
-        let mut clock =
-            SlotClock::from_era_schedule(eras(OffsetDateTime::now_utc(), slot_duration, None));
+        let mut clock = SlotClock::from_chain_start_time(SystemTime::now(), slot_duration);
         clock.observe_slot(Slot::from(10));
         let anchor = clock.last_observed_at;
 

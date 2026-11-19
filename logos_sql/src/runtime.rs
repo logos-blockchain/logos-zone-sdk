@@ -4,6 +4,7 @@ use std::{num::NonZeroU16, thread, time::Duration};
 
 use lb_zone_sdk::{
     adapter::NodeHttpClient,
+    core::mantle::ops::channel::inscribe::MAX_BYTES,
     node_types::{ChannelId, Inscription},
     sequencer::{Event, SequencerCheckpoint, ZoneSequencer, channel_inscriptions},
 };
@@ -23,6 +24,12 @@ use crate::{
     status::{Displacement, WriteStatus},
 };
 
+// The node's inscription size limit.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "The limit is far below `u32::MAX`."
+)]
+const MAX_INSCRIPTION_SIZE: u32 = MAX_BYTES as u32;
 const COMMAND_CHANNEL_CAPACITY: usize = 16;
 const PUBLISH_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 // A short window lets sequential execute calls share publication overhead.
@@ -322,17 +329,8 @@ impl Runtime {
                 self.retry_pending_event(&sequencer)?;
             }
 
-            // Writes wait for the inscription limit of the node's era, asked
-            // for as soon as the sequencer is ready.
             if self.sequencer_ready && self.max_inscription_size.is_none() {
-                match sequencer.max_inscription_size().await {
-                    Ok(max_inscription_size) => {
-                        self.max_inscription_size = Some(max_inscription_size);
-                    }
-                    Err(error) => {
-                        tracing::warn!(target: TARGET, %error, "writes wait for the node's inscription limit");
-                    }
-                }
+                self.max_inscription_size = Some(MAX_INSCRIPTION_SIZE);
             }
 
             // Publish against fully applied channel history, after the batch
@@ -613,9 +611,7 @@ impl Runtime {
         }
         self.persist_publish_checkpoint()?;
 
-        // A publication, and the writes after it, are held to the era the node
-        // is in now.
-        let max_inscription_size = sequencer.max_inscription_size().await?;
+        let max_inscription_size = MAX_INSCRIPTION_SIZE;
         self.max_inscription_size = Some(max_inscription_size);
 
         let Some(pending) = Publication::prepare(
@@ -627,7 +623,7 @@ impl Runtime {
             return Ok(());
         };
 
-        let inscription = Inscription::try_new(pending.payload.clone(), max_inscription_size)
+        let inscription = Inscription::try_from(pending.payload.clone())
             .map_err(|_| Error::InscriptionTooLarge)?;
 
         let (published, checkpoint) = sequencer.handle().publish(inscription).await?;
@@ -749,9 +745,8 @@ const fn is_retryable_apply_error(error: &Error) -> bool {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use lb_core::{
-        era::ForkDigest,
-        mantle::{Op, SignedOps, ops::channel::inscribe::InscriptionOp, transactions::Ops},
+    use lb_core::mantle::{
+        Op, SignedOps, ops::channel::inscribe::InscriptionOp, transactions::Ops,
     };
     use lb_key_management_system_service::keys::{Ed25519Key, UnverifiedEd25519PublicKey};
     use lb_zone_sdk::{
@@ -803,15 +798,15 @@ mod tests {
         }
         .encode(MAX_INSCRIPTION_SIZE)
         .unwrap();
-        let tx = SignedOps::from_ops_with_sample_proofs(Ops::new(
-            ForkDigest::new([0x11; 32]),
-            [Op::ChannelInscribe(InscriptionOp {
+        let tx = SignedOps::from_ops_with_sample_proofs(
+            Ops::try_from(vec![Op::ChannelInscribe(InscriptionOp {
                 channel_id,
-                inscription: Inscription::new_unchecked(payload),
+                inscription: payload.try_into().unwrap(),
                 parent: MsgId::root(),
                 signer: UnverifiedEd25519PublicKey::from_bytes(&[0; 32]).unwrap(),
-            })],
-        ));
+            })])
+            .unwrap(),
+        );
         let inscription = channel_inscriptions(&tx, channel_id).remove(0);
         let checkpoint = SequencerCheckpoint {
             last_msg_id: inscription.this_msg,
@@ -1003,7 +998,7 @@ mod tests {
                 tx_hash: TxHash::from([4; 32]),
                 parent_msg: MsgId::root(),
                 this_msg,
-                payload: Inscription::new_unchecked(publication.payload),
+                payload: Inscription::try_from(publication.payload).unwrap(),
                 signer: None,
             })],
         };
@@ -1421,7 +1416,7 @@ mod tests {
             tx_hash: TxHash::from([position; 32]),
             parent_msg: MsgId::root(),
             this_msg,
-            payload: Inscription::new_unchecked(pending.payload),
+            payload: Inscription::try_from(pending.payload).unwrap(),
             signer: None,
         }
     }
@@ -1459,7 +1454,7 @@ mod tests {
             tx_hash: TxHash::from([2; 32]),
             parent_msg: MsgId::root(),
             this_msg: MsgId::from([2; 32]),
-            payload: Inscription::new_unchecked(pending.payload.clone()),
+            payload: Inscription::try_from(pending.payload.clone()).unwrap(),
             signer: None,
         };
         let event = orphan_event(inscription.clone());
