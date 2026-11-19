@@ -241,6 +241,10 @@ pub(super) enum ActorRequest {
         tx: Ops,
         response_tx: oneshot::Sender<Result<Ed25519Signature, Error>>,
     },
+    SetSigner {
+        signing_key: Ed25519Key,
+        response_tx: oneshot::Sender<()>,
+    },
     ChannelWallet {
         response_tx: oneshot::Sender<ChannelWalletView>,
     },
@@ -771,6 +775,13 @@ where
             }
             ActorRequest::SignTx { tx, response_tx } => {
                 drop(response_tx.send(self.do_sign_tx(&tx)));
+            }
+            ActorRequest::SetSigner {
+                signing_key,
+                response_tx,
+            } => {
+                self.do_set_signer(signing_key);
+                let _ = response_tx.send(());
             }
         }
     }

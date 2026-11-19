@@ -8,7 +8,7 @@ use lb_core::{
     },
     proofs::channel_multi_sig_proof::IndexedSignatures,
 };
-use lb_key_management_system_service::keys::Ed25519Signature;
+use lb_key_management_system_service::keys::{Ed25519Key, Ed25519Signature};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use super::{
@@ -270,6 +270,17 @@ impl SequencerClient {
             response_tx,
         })?;
         Self::recv(response_rx).await?
+    }
+
+    /// Replace the signing key in flight. Async counterpart of
+    /// [`super::SequencerHandle::set_signer`].
+    pub async fn set_signer(&self, signing_key: Ed25519Key) -> Result<(), Error> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.send(ActorRequest::SetSigner {
+            signing_key,
+            response_tx,
+        })?;
+        Self::recv(response_rx).await
     }
 
     /// The channel's tracked note set, served by the drive task — see

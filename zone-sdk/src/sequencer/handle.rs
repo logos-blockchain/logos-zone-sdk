@@ -8,7 +8,7 @@ use lb_core::{
     },
     proofs::channel_multi_sig_proof::IndexedSignatures,
 };
-use lb_key_management_system_service::keys::Ed25519Signature;
+use lb_key_management_system_service::keys::{Ed25519Key, Ed25519Signature};
 
 use super::{
     types::{
@@ -104,6 +104,15 @@ where
     /// not mutate sequencer state.
     pub fn sign_tx(&mut self, tx: &Ops) -> Result<Ed25519Signature, Error> {
         self.sequencer.do_sign_tx(tx)
+    }
+
+    /// Replace the signing key in flight. A sequencer started with a key
+    /// outside the channel's accredited keys becomes a writing one once the
+    /// new key is accredited and its turn comes; the channel view and the
+    /// turn-to-write watch follow at once. Async counterpart:
+    /// [`super::SequencerClient::set_signer`].
+    pub fn set_signer(&mut self, signing_key: Ed25519Key) {
+        self.sequencer.do_set_signer(signing_key);
     }
 
     /// Enqueue a [`SignedOps`] associated with a [`MsgId`] for posting.

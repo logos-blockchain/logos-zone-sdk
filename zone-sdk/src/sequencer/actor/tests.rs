@@ -20,7 +20,7 @@ use lb_core::{
         transactions::{OpProofs, Ops, TxList, states::Unverified},
     },
 };
-use lb_key_management_system_service::keys::{Ed25519Key, ZkKey};
+use lb_key_management_system_service::keys::ZkKey;
 use num_bigint::BigUint;
 use rand::{RngCore as _, thread_rng};
 use tokio::sync::{mpsc, watch};
@@ -30,7 +30,7 @@ use super::{
         block_fetch::ViewBefore,
         block_states::{BlockChannelTx, ChannelTxKind},
         state::PendingBundle,
-        types::{ConfigInfo, FinalizedOp, InscriptionInfo, SequencerConfig},
+        types::{ConfigInfo, FinalizedOp, InscriptionInfo, PendingTx, SequencerConfig},
         zone_sequencer::track_pending_tx,
     },
     *,
@@ -2309,6 +2309,72 @@ async fn ready_sequencer_with_channel(
         }
     }
     sequencer
+}
+
+/// A sequencer started with a key outside the accredited set is read-only;
+/// swapping in the accredited key through the handle makes it the writer
+/// without a restart, and the channel view follows at once.
+#[tokio::test]
+async fn set_signer_turns_a_read_only_sequencer_into_a_writer() {
+    let accredited = Ed25519Key::from_bytes(&[0; 32]);
+    let outsider = Ed25519Key::from_bytes(&[9; 32]);
+    let mut sequencer =
+        ready_sequencer_with_channel(Some(single_key_channel_state()), outsider).await;
+    let view_rx = sequencer.subscribe_channel_view();
+    assert_eq!(view_rx.borrow().own_key_index, None);
+    assert!(!view_rx.borrow().our_turn_to_write);
+    sequencer
+        .handle()
+        .publish(Inscription::new_unchecked(b"before".to_vec()))
+        .await
+        .expect("a read-only sequencer queues the publish for its turn");
+    assert!(!view_rx.borrow().our_turn_to_write);
+
+    sequencer.handle().set_signer(accredited.clone());
+
+    assert_eq!(view_rx.borrow().own_key_index, Some(0));
+    assert!(view_rx.borrow().our_turn_to_write);
+    let (result, _checkpoint) = sequencer
+        .handle()
+        .publish(Inscription::new_unchecked(b"after".to_vec()))
+        .await
+        .expect("the accredited key publishes");
+    let PendingTx::Inscription(info) = result.tx else {
+        panic!("a publish enqueues an inscription");
+    };
+    assert_eq!(
+        info.signer,
+        Some(accredited.public_key().into_unverified()),
+        "the inscription carries the new signer"
+    );
+}
+
+/// The same swap through the client, serviced by the drive loop.
+#[tokio::test]
+async fn client_set_signer_is_serviced_by_the_drive_loop() {
+    let accredited = Ed25519Key::from_bytes(&[0; 32]);
+    let outsider = Ed25519Key::from_bytes(&[9; 32]);
+    let mut sequencer =
+        ready_sequencer_with_channel(Some(single_key_channel_state()), outsider).await;
+    let client = sequencer.client();
+    let mut turn_rx = client.subscribe_turn_to_write();
+    assert!(!turn_rx.borrow_and_update().our_turn_to_write);
+
+    let set = client.set_signer(accredited);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::select! {
+            result = set => result.expect("the drive loop services the request"),
+            () = async { loop { drop(sequencer.next_event().await); } } => unreachable!(),
+        }
+    })
+    .await
+    .expect("set_signer resolves while the sequencer is driven");
+
+    assert!(turn_rx.borrow_and_update().our_turn_to_write);
+    assert_eq!(
+        client.subscribe_channel_view().borrow().own_key_index,
+        Some(0)
+    );
 }
 
 /// The config op's signature must claim our key's index in the *current*

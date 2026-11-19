@@ -16,7 +16,10 @@
 //! [`sequencer::SequencerCheckpoint`]'s slot when resuming. Construction
 //! still requires a [`sequencer::FundingConfig`]; for a read-only instance
 //! pass a placeholder — funding is only exercised by publish-type calls,
-//! which such a sequencer never makes.
+//! which such a sequencer never makes. Such a sequencer becomes a writing one
+//! without a restart through [`sequencer::SequencerHandle::set_signer`] or
+//! [`sequencer::SequencerClient::set_signer`], once the key it is given is
+//! accredited.
 //!
 //! The sequencer talks to a Logos node through the [`adapter`] module's
 //! [`adapter::Node`] trait; an HTTP implementation is provided as

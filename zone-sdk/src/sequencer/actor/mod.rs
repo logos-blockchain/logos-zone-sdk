@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use lb_common_http_client::{ProcessedBlockEvent, Slot};
 use lb_core::mantle::{channel::ChannelState, ops::channel::ChannelId, transactions::hash::TxHash};
+use lb_key_management_system_service::keys::Ed25519Key;
 use tracing::{debug, error, info, warn};
 
 use super::{
@@ -205,6 +206,19 @@ where
             .as_ref()
             .and_then(|channel| self.own_key_index_for(channel));
         self.channel_state = channel;
+    }
+
+    /// Replaces the signing key. The own key index follows the new key, so a
+    /// sequencer whose key was outside the accredited set posts once the new
+    /// one holds the turn. Pending txs keep the signatures they were posted
+    /// with.
+    pub(super) fn do_set_signer(&mut self, signing_key: Ed25519Key) {
+        self.signing_key = signing_key;
+        self.own_key_index = self
+            .channel_state
+            .as_ref()
+            .and_then(|channel| self.own_key_index_for(channel));
+        self.publish_channel_view();
     }
 
     pub(super) async fn refresh_channel_state(&mut self) -> Result<(), Error> {
