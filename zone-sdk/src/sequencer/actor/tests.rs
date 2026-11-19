@@ -166,26 +166,31 @@ async fn submit_signed_tx_refuses_a_parent_with_a_mined_child() {
     let mined = inscribe_op(channel_id, MsgId::root(), b"1");
     let mined_tx = unverified_tx_with_ops(vec![Op::ChannelInscribe(mined.clone())]);
     let lib = sequencer.state.as_ref().unwrap().lib();
-    sequencer.state.as_mut().unwrap().process_block(
-        header_id(1),
-        lib,
-        lib,
-        std::iter::empty(),
-        vec![BlockChannelTx::new(
-            Arc::new(mined_tx.clone()),
-            mined_tx.hash(),
-            ChannelTxKind::Inscription(InscriptionInfo {
-                tx_hash: mined_tx.hash(),
-                parent_msg: MsgId::root(),
-                this_msg: mined.id(),
-                payload: mined.inscription.clone(),
-                signer: Some(mined.signer),
-                steps: InscriptionSteps::default(),
-            }),
-        )],
-        vec![],
-        None,
-    );
+    sequencer
+        .state
+        .as_mut()
+        .unwrap()
+        .process_block(
+            header_id(1),
+            lib,
+            lib,
+            std::iter::empty(),
+            vec![BlockChannelTx::new(
+                Arc::new(mined_tx.clone()),
+                mined_tx.hash(),
+                ChannelTxKind::Inscription(InscriptionInfo {
+                    tx_hash: mined_tx.hash(),
+                    parent_msg: MsgId::root(),
+                    this_msg: mined.id(),
+                    payload: mined.inscription.clone(),
+                    signer: Some(mined.signer),
+                    steps: InscriptionSteps::default(),
+                }),
+            )],
+            vec![],
+            None,
+        )
+        .unwrap();
     sequencer.current_tip = Some(header_id(1));
     assert_eq!(sequencer.compute_publish_parent(), mined.id());
 
@@ -2066,19 +2071,24 @@ async fn update_variant_follows_orphaned() {
     let mined = inscribe_op(channel_id, MsgId::root(), b"1");
     let mined_tx = unverified_tx_with_ops(vec![Op::ChannelInscribe(mined.clone())]);
     let lib = sequencer.state.as_ref().unwrap().lib();
-    sequencer.state.as_mut().unwrap().process_block(
-        header_id(1),
-        lib,
-        lib,
-        std::iter::empty(),
-        vec![BlockChannelTx::new(
-            Arc::new(mined_tx.clone()),
-            mined_tx.hash(),
-            ChannelTxKind::Inscription(info_of(&mined)),
-        )],
-        vec![],
-        None,
-    );
+    sequencer
+        .state
+        .as_mut()
+        .unwrap()
+        .process_block(
+            header_id(1),
+            lib,
+            lib,
+            std::iter::empty(),
+            vec![BlockChannelTx::new(
+                Arc::new(mined_tx.clone()),
+                mined_tx.hash(),
+                ChannelTxKind::Inscription(info_of(&mined)),
+            )],
+            vec![],
+            None,
+        )
+        .unwrap();
     sequencer.current_tip = Some(header_id(1));
     let adopted = ChannelUpdateTx::Inscription(info_of(&inscribe_op(channel_id, mined.id(), b"3")));
 
@@ -2446,6 +2456,131 @@ async fn program_notes_follow_the_channel_and_survive_a_checkpoint() {
             .path
             .verify::<ZkHasher>(commitment.0, view.root)
     );
+}
+
+/// A checkpoint written before the note set was tracked carries none: the
+/// restored sequencer rebuilds it from the finalized history up to the
+/// checkpoint's LIB before it is ready, and serves the notes with paths
+/// against the ledger's root.
+#[tokio::test]
+#[expect(clippy::too_many_lines, reason = "Test function.")]
+async fn a_checkpoint_without_program_notes_rebuilds_the_set_from_the_finalized_history() {
+    use std::collections::HashMap;
+
+    use lb_core::{
+        crypto::ZkHasher,
+        events::{BlockEvent, Event as ChainEvent, Events},
+        mantle::{
+            note_set::{CommitmentMmr, NoteSetIndex, NoteSetUpdate},
+            ops::channel::{
+                inscribe::{MiniBlock, MiniBlocks, Step},
+                program_step::ProgramStep,
+            },
+        },
+    };
+
+    use crate::{
+        sequencer::program_notes::fixtures::{foreign, program, sample_opening},
+        test_support::{inscribe_op, unverified_tx_with_ops},
+    };
+
+    let channel_id = ChannelId::from([0; 32]);
+    let opening = sample_opening();
+    let commitment = opening.note(program()).commitment();
+    let step = ProgramStep {
+        program_id: program(),
+        program_outputs: [commitment].into(),
+        ..ProgramStep::sample()
+    };
+    let mut op = inscribe_op(channel_id, MsgId::root(), b"step");
+    op.mini_blocks = MiniBlocks::from([MiniBlock::try_from(vec![Step::Program(step)]).unwrap()]);
+    // B1 appended a foreign note and the program's; B2 only another foreign
+    // one. Both are finalized history below the checkpoint's LIB.
+    let b1 = api_block(
+        1,
+        0,
+        1,
+        vec![unverified_tx_with_ops(vec![Op::ChannelInscribe(op)])],
+    );
+    let deposit = DepositOp {
+        channel_id,
+        ..DepositOp::sample()
+    };
+    let b2 = api_block(
+        2,
+        1,
+        2,
+        vec![unverified_tx_with_ops(vec![Op::ChannelDeposit(
+            deposit.clone(),
+        )])],
+    );
+    let update = |commitments: Vec<NoteCommitment>| {
+        Events::from(ChainEvent::Block(BlockEvent::NoteSetUpdated(
+            NoteSetUpdate {
+                note_set: NoteSetIndex::Channel(channel_id),
+                nullifiers: vec![],
+                commitments,
+            },
+        )))
+    };
+    let b2_tx = unverified_tx_with_ops(vec![Op::ChannelDeposit(deposit.clone())]);
+    let mut b2_events = crate::test_support::deposit_event(&b2_tx, &deposit);
+    b2_events.extend(update(vec![foreign(2)]));
+    let node = MockNode {
+        lib: header_id(2),
+        tip: header_id(2),
+        lib_slot: Slot::from(2u64),
+        immutable: vec![b1, b2],
+        events: HashMap::from([
+            (header_id(1), update(vec![foreign(1), commitment])),
+            (header_id(2), b2_events),
+        ]),
+        ..MockNode::default()
+    };
+    let checkpoint = SequencerCheckpoint {
+        last_msg_id: MsgId::root(),
+        pending_txs: vec![],
+        lib: header_id(2),
+        lib_slot: Slot::from(2u64),
+        finalized_config: MsgId::root(),
+        funding: vec![],
+        program_notes: None,
+    };
+    let mut sequencer = ZoneSequencer::init(
+        channel_id,
+        Ed25519Key::from_bytes(&[0; 32]),
+        node,
+        funding_config(),
+        Some(checkpoint),
+    );
+    assert_eq!(
+        sequencer.program_notes().finalized,
+        [],
+        "nothing is served before the rebuild"
+    );
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let event = tokio::time::timeout_at(deadline, sequencer.next_event())
+            .await
+            .expect("the sequencer gets ready");
+        if matches!(event, Event::Ready) {
+            break;
+        }
+    }
+    let view = sequencer.handle().program_notes();
+    assert_eq!(view.unfinalized, []);
+    assert_eq!(view.finalized.len(), 1);
+    let note = &view.finalized[0];
+    assert_eq!(note.commitment, commitment);
+    assert_eq!(note.opening, opening);
+    let expected_root = [foreign(1), commitment, foreign(2)]
+        .iter()
+        .fold(CommitmentMmr::new(), |mmr, commitment| {
+            mmr.push(*commitment).unwrap()
+        })
+        .frontier_root();
+    assert_eq!(view.root, expected_root, "the rebuilt set is the ledger's");
+    assert!(note.path.verify::<ZkHasher>(commitment.0, view.root));
 }
 
 /// The config op's signature must claim our key's index in the *current*

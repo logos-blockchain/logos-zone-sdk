@@ -70,7 +70,8 @@ pub struct SequencerCheckpoint {
     #[serde(default)]
     pub funding: Vec<PendingFunding>,
     /// The finalized program note set. `None` in checkpoints written before
-    /// the set was tracked: the set then starts empty at LIB.
+    /// the set was tracked: the set is then rebuilt from the finalized
+    /// history on restore.
     #[serde(default)]
     pub program_notes: Option<ProgramNotesCheckpoint>,
 }
@@ -378,6 +379,11 @@ pub enum Error {
     /// The step proofs do not fit the steps of the inscription.
     #[error("step proofs rejected: {0}")]
     InvalidStepProofs(String),
+    /// A block's update of the channel's note set could not be applied, so
+    /// the tracked set would no longer match the ledger's. The block is not
+    /// recorded.
+    #[error("channel note set: {0}")]
+    NoteSet(String),
     /// The program key is not a valid Groth16 verification key; the ledger
     /// would reject the registration. Not recoverable by retrying.
     #[error("program key rejected: {0}")]

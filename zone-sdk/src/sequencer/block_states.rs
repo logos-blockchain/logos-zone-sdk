@@ -17,11 +17,10 @@ use lb_core::{
         transactions::{hash::TxHash, states::Unverified},
     },
 };
+use lb_mmr::PushWithPathsError;
 use rpds::{HashTrieSetSync, ListSync};
-use tracing::error;
 
 use super::{
-    TARGET,
     program_notes::{BlockNoteSet, ProgramNoteSet},
     types::{InscriptionInfo, ObservedOp, ProgramNotesCheckpoint, ProgramNotesView},
 };
@@ -287,7 +286,9 @@ impl BlockStates {
 
     /// Record `block_id` under `parent_id` with its classified channel txs;
     /// `our_txs` are the hashes that become safe at this block, `note_set`
-    /// what it does to the channel's note set.
+    /// what it does to the channel's note set. Fails, recording nothing,
+    /// when that update cannot be applied: the tracked set would no longer
+    /// match the ledger's.
     pub fn insert(
         &mut self,
         block_id: HeaderId,
@@ -296,10 +297,7 @@ impl BlockStates {
         channel_txs: Vec<BlockChannelTx>,
         observed: Vec<ObservedOp>,
         note_set: Option<BlockNoteSet>,
-    ) {
-        // Store parent relationship for pruning
-        self.parent_map.insert(block_id, parent_id);
-
+    ) -> Result<(), PushWithPathsError> {
         // Build cumulative state from the parent. Parent may be missing
         // when blocks are processed from slot-range backfill and LIB has
         // advanced between batches (pruning the parent). Starting the safe
@@ -310,6 +308,13 @@ impl BlockStates {
         // block is not mirrored on arrival, and its txs must read as mined
         // once the branch turns canonical and the store re-mirrors them.
         let parent = self.block_states.get(&parent_id);
+        // A block whose parent is unknown continues the finalized set, the
+        // nearest branch state there is.
+        let parent_notes = parent.map_or_else(|| self.finalized.notes.clone(), |p| p.notes.clone());
+        let notes = match note_set {
+            Some(block) => parent_notes.apply(&block)?,
+            None => parent_notes,
+        };
         let mut safe_set = parent.map(|p| p.safe_set.clone()).unwrap_or_default();
         let channel_txs: Vec<Arc<BlockChannelTx>> = channel_txs.into_iter().map(Arc::new).collect();
         let lineage = Lineage::extend(parent.map(|p| &p.lineage), &channel_txs);
@@ -317,16 +322,8 @@ impl BlockStates {
         for tx in our_txs {
             safe_set = safe_set.insert(tx);
         }
-        // A block whose parent is unknown continues the finalized set, the
-        // nearest branch state there is.
-        let parent_notes = parent.map_or_else(|| self.finalized.notes.clone(), |p| p.notes.clone());
-        let notes = match note_set {
-            Some(block) => parent_notes.apply(&block).unwrap_or_else(|err| {
-                error!(target: TARGET, ?block_id, %err, "Could not apply the block's note set update");
-                parent_notes
-            }),
-            None => parent_notes,
-        };
+        // Store parent relationship for pruning
+        self.parent_map.insert(block_id, parent_id);
         self.block_states.insert(
             block_id,
             BlockState {
@@ -340,6 +337,7 @@ impl BlockStates {
         if !channel_txs.is_empty() {
             self.block_txs.insert(block_id, channel_txs);
         }
+        Ok(())
     }
 
     /// Move LIB to `lib`: advance the finalized tips, prune the
@@ -596,7 +594,9 @@ mod tests {
     use crate::test_support::{header_id, inscribe_op, unverified_tx_with_ops};
 
     fn process(blocks: &mut BlockStates, block: HeaderId, parent: HeaderId, lib: HeaderId) {
-        blocks.insert(block, parent, [], Vec::new(), vec![], None);
+        blocks
+            .insert(block, parent, [], Vec::new(), vec![], None)
+            .unwrap();
         if lib != blocks.lib() {
             blocks.advance_lib(lib, |_| false);
         }
@@ -644,10 +644,16 @@ mod tests {
         let genesis = header_id(0);
         let (a1, a2, a3, b1) = (header_id(1), header_id(2), header_id(3), header_id(10));
         let mut blocks = BlockStates::new(genesis, MsgId::root());
-        blocks.insert(a1, genesis, [], vec![inscription(0, 1)], vec![], None);
-        blocks.insert(a2, a1, [], vec![config(0, 11)], vec![], None);
-        blocks.insert(a3, a2, [], Vec::new(), vec![], None);
-        blocks.insert(b1, a1, [], vec![inscription(1, 2)], vec![], None);
+        blocks
+            .insert(a1, genesis, [], vec![inscription(0, 1)], vec![], None)
+            .unwrap();
+        blocks
+            .insert(a2, a1, [], vec![config(0, 11)], vec![], None)
+            .unwrap();
+        blocks.insert(a3, a2, [], Vec::new(), vec![], None).unwrap();
+        blocks
+            .insert(b1, a1, [], vec![inscription(1, 2)], vec![], None)
+            .unwrap();
 
         assert_eq!(blocks.channel_tip_at(a3), msg_id(1));
         assert_eq!(blocks.config_tip_at(a3), msg_id(11));
@@ -664,9 +670,15 @@ mod tests {
         let genesis = header_id(0);
         let (a1, a2, a3) = (header_id(1), header_id(2), header_id(3));
         let mut blocks = BlockStates::new(genesis, MsgId::root());
-        blocks.insert(a1, genesis, [], vec![inscription(0, 1)], vec![], None);
-        blocks.insert(a2, a1, [], vec![config(0, 11)], vec![], None);
-        blocks.insert(a3, a2, [], vec![inscription(1, 2)], vec![], None);
+        blocks
+            .insert(a1, genesis, [], vec![inscription(0, 1)], vec![], None)
+            .unwrap();
+        blocks
+            .insert(a2, a1, [], vec![config(0, 11)], vec![], None)
+            .unwrap();
+        blocks
+            .insert(a3, a2, [], vec![inscription(1, 2)], vec![], None)
+            .unwrap();
         blocks.advance_lib(a2, |_| false);
 
         assert_eq!(blocks.finalized_msg(), msg_id(1));
@@ -692,9 +704,15 @@ mod tests {
         let (a1, x, y) = (header_id(1), header_id(2), header_id(3));
         let unknown = header_id(99);
         let mut blocks = BlockStates::new(genesis, MsgId::root());
-        blocks.insert(a1, genesis, [], vec![inscription(0, 1)], vec![], None);
-        blocks.insert(x, unknown, [], vec![inscription(1, 2)], vec![], None);
-        blocks.insert(y, unknown, [], Vec::new(), vec![], None);
+        blocks
+            .insert(a1, genesis, [], vec![inscription(0, 1)], vec![], None)
+            .unwrap();
+        blocks
+            .insert(x, unknown, [], vec![inscription(1, 2)], vec![], None)
+            .unwrap();
+        blocks
+            .insert(y, unknown, [], Vec::new(), vec![], None)
+            .unwrap();
 
         assert_eq!(blocks.channel_tip_at(x), msg_id(2));
         assert_eq!(ids(blocks.infos_on_branch(x)), [msg_id(2)]);
@@ -719,22 +737,26 @@ mod tests {
             .apply(&block(&[], &[1], &[]))
             .unwrap();
         blocks.restore_finalized_program_notes(finalized.to_checkpoint());
-        blocks.insert(
-            a1,
-            genesis,
-            [],
-            Vec::new(),
-            vec![],
-            Some(block(&[], &[2], &[1])),
-        );
-        blocks.insert(
-            b1,
-            genesis,
-            [],
-            Vec::new(),
-            vec![],
-            Some(block(&[], &[3], &[])),
-        );
+        blocks
+            .insert(
+                a1,
+                genesis,
+                [],
+                Vec::new(),
+                vec![],
+                Some(block(&[], &[2], &[1])),
+            )
+            .unwrap();
+        blocks
+            .insert(
+                b1,
+                genesis,
+                [],
+                Vec::new(),
+                vec![],
+                Some(block(&[], &[3], &[])),
+            )
+            .unwrap();
 
         let at_a = blocks.program_notes_at(Some(a1));
         assert!(
@@ -762,15 +784,19 @@ mod tests {
         let a1 = header_id(1);
         let a2 = header_id(2);
         let mut blocks = BlockStates::new(genesis, MsgId::root());
-        blocks.insert(
-            a1,
-            genesis,
-            [],
-            Vec::new(),
-            vec![],
-            Some(block(&[], &[1], &[])),
-        );
-        blocks.insert(a2, a1, [], Vec::new(), vec![], Some(block(&[], &[], &[1])));
+        blocks
+            .insert(
+                a1,
+                genesis,
+                [],
+                Vec::new(),
+                vec![],
+                Some(block(&[], &[1], &[])),
+            )
+            .unwrap();
+        blocks
+            .insert(a2, a1, [], Vec::new(), vec![], Some(block(&[], &[], &[1])))
+            .unwrap();
         let view = blocks.program_notes_at(Some(a2));
         assert_eq!(view.finalized, []);
         assert_eq!(view.unfinalized, []);
@@ -784,15 +810,19 @@ mod tests {
         let a1 = header_id(1);
         let a2 = header_id(2);
         let mut blocks = BlockStates::new(genesis, MsgId::root());
-        blocks.insert(
-            a1,
-            genesis,
-            [],
-            Vec::new(),
-            vec![],
-            Some(block(&[9], &[1], &[])),
-        );
-        blocks.insert(a2, a1, [], Vec::new(), vec![], Some(block(&[], &[2], &[])));
+        blocks
+            .insert(
+                a1,
+                genesis,
+                [],
+                Vec::new(),
+                vec![],
+                Some(block(&[9], &[1], &[])),
+            )
+            .unwrap();
+        blocks
+            .insert(a2, a1, [], Vec::new(), vec![], Some(block(&[], &[2], &[])))
+            .unwrap();
         assert_eq!(blocks.program_notes_at(Some(a2)).finalized, []);
 
         blocks.advance_lib(a1, |_| false);
@@ -818,14 +848,16 @@ mod tests {
             .apply(&block(&[], &[1], &[]))
             .unwrap();
         blocks.restore_finalized_program_notes(finalized.to_checkpoint());
-        blocks.insert(
-            orphan,
-            header_id(4),
-            [],
-            Vec::new(),
-            vec![],
-            Some(block(&[], &[2], &[])),
-        );
+        blocks
+            .insert(
+                orphan,
+                header_id(4),
+                [],
+                Vec::new(),
+                vec![],
+                Some(block(&[], &[2], &[])),
+            )
+            .unwrap();
         let view = blocks.program_notes_at(Some(orphan));
         assert_eq!(commitments(&view.finalized), [commitment(1)]);
         assert_eq!(commitments(&view.unfinalized), [commitment(2)]);

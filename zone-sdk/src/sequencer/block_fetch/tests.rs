@@ -246,15 +246,17 @@ fn deposit_plus_inscription_is_adopted_as_custom() {
     let mut state = TxState::new(genesis, MsgId::root());
     let old_lineage = state.channel_lineage(genesis);
     mirror_channel_txs(&mut state, &classified, channel_id);
-    state.process_block(
-        block,
-        genesis,
-        genesis,
-        vec![tx_hash],
-        classified,
-        vec![],
-        None,
-    );
+    state
+        .process_block(
+            block,
+            genesis,
+            genesis,
+            vec![tx_hash],
+            classified,
+            vec![],
+            None,
+        )
+        .unwrap();
 
     assert!(
         state.is_tracked(&tx_hash),
@@ -349,15 +351,17 @@ fn mixed_config_tx_is_custom_but_advances_the_config_tip() {
     let genesis = header_id(0);
     let block = header_id(1);
     let mut state = TxState::new(genesis, MsgId::root());
-    state.process_block(
-        block,
-        genesis,
-        genesis,
-        vec![tx_hash],
-        classified,
-        vec![],
-        None,
-    );
+    state
+        .process_block(
+            block,
+            genesis,
+            genesis,
+            vec![tx_hash],
+            classified,
+            vec![],
+            None,
+        )
+        .unwrap();
     assert_eq!(state.config_tip_at(block), config_id);
 }
 
@@ -389,15 +393,17 @@ fn multi_inscribe_tx_advances_tip_and_delivers_adopted_entries() {
     let mut state = TxState::new(genesis, MsgId::root());
     let old_lineage = state.channel_lineage(genesis);
     mirror_channel_txs(&mut state, &classified, channel_id);
-    state.process_block(
-        block,
-        genesis,
-        genesis,
-        vec![tx_hash],
-        classified,
-        vec![],
-        None,
-    );
+    state
+        .process_block(
+            block,
+            genesis,
+            genesis,
+            vec![tx_hash],
+            classified,
+            vec![],
+            None,
+        )
+        .unwrap();
 
     assert!(
         state.is_tracked(&tx_hash),
@@ -582,15 +588,17 @@ fn config_in_block_does_not_advance_channel_tip() {
     let extracted = run_with_timeout(std::time::Duration::from_secs(2), move || {
         classify_channel_txs(std::slice::from_ref(&tx), channel_id)
     });
-    state.process_block(
-        block,
-        genesis,
-        genesis,
-        vec![tx_hash],
-        extracted,
-        vec![],
-        None,
-    );
+    state
+        .process_block(
+            block,
+            genesis,
+            genesis,
+            vec![tx_hash],
+            extracted,
+            vec![],
+            None,
+        )
+        .unwrap();
 
     assert_eq!(
         state.channel_tip_at(block),
@@ -673,6 +681,57 @@ async fn canonical_backfill_gap_deposits_are_observed() {
 /// gap block was prepared, fails the event with nothing applied: no
 /// partial deposits, no partial blocks, tip unchanged. The retry reports
 /// every gap block's deposits and the live block's, in order.
+/// A block whose inscription carries steps appends to the channel's note
+/// set, so its events must carry the set's update: without it the event
+/// fails and nothing is applied, as for a missing deposit event.
+#[tokio::test]
+async fn missing_note_set_update_fails_the_block_event() {
+    use lb_core::mantle::ops::channel::{
+        inscribe::{MiniBlock, Step},
+        program_step::ProgramStep,
+    };
+
+    let ch = ChannelId::from([0u8; 32]);
+    let mut op = inscribe_op(ch, MsgId::root(), b"step");
+    op.mini_blocks =
+        MiniBlocks::from([
+            MiniBlock::try_from(vec![Step::Program(ProgramStep::sample())]).unwrap(),
+        ]);
+    let b1 = api_block(
+        1,
+        0,
+        1,
+        vec![unverified_tx_with_ops(vec![Op::ChannelInscribe(op)])],
+    );
+    let node = MockNode {
+        blocks: vec![b1.clone()],
+        ..MockNode::default()
+    };
+    let mut state = None;
+    let mut current_tip = None;
+    let mut lib_slot = Slot::genesis();
+
+    let result = handle_block_event(
+        &live_event(&b1),
+        &mut state,
+        &mut current_tip,
+        &mut lib_slot,
+        ch,
+        &node,
+    )
+    .await;
+    let reason = match result {
+        Err(Error::Network(reason)) => reason,
+        Err(error) => panic!("another error: {error}"),
+        Ok(_) => panic!("the missing update fails the event"),
+    };
+    assert!(
+        reason.contains("note set update"),
+        "the missing update fails the event: {reason}"
+    );
+    assert!(state.is_none(), "nothing is applied");
+}
+
 #[tokio::test]
 async fn deposit_events_failure_on_a_later_gap_block_applies_nothing() {
     // G(0) <- B1 (live) <- B2 (D2, missed) <- B3 (D3, missed) <- B4 (D4, live)

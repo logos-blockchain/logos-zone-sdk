@@ -6,19 +6,29 @@
 use std::num::NonZero;
 
 use lb_common_http_client::{ChainServiceInfo, EraTiming as ReportedEraTiming, Slot, TimeInfo};
-use lb_core::mantle::ops::channel::MsgId;
+use lb_core::mantle::ops::channel::{ChannelId, MsgId};
 use lb_time::era::{EraEntriesAfterGenesis, EraTiming, EraTimingSchedule};
 use tracing::{debug, error, info, warn};
 
 use super::{
     TARGET,
-    block_fetch::{fetch_and_process_blocks, landed_msg_ids},
+    block_fetch::{fetch_and_process_blocks, fetch_note_set_updates, landed_msg_ids},
+    program_notes::ProgramNoteSet,
     slot_clock::SlotClock,
     state::TxState,
     types::{ChannelUpdate, Error, Event, FinalizedOp},
     zone_sequencer::ZoneSequencer,
 };
 use crate::adapter;
+
+/// The rebuild of the channel's note set from the finalized history, for a
+/// checkpoint written before the set was tracked: the set so far and the
+/// first slot still to fold in.
+#[derive(Debug, Default)]
+pub(super) struct NoteSetRebuild {
+    next_slot: u64,
+    set: ProgramNoteSet,
+}
 
 impl<Node> ZoneSequencer<Node>
 where
@@ -155,11 +165,63 @@ where
         if !self.init_state_if_needed().await {
             return false;
         }
+        if !self.rebuild_note_set_if_needed().await {
+            return false;
+        }
         if !self.open_block_stream().await {
             return false;
         }
         if !self.setup_backfill_range().await {
             return false;
+        }
+        true
+    }
+
+    /// Rebuilds the channel's note set at the checkpoint's LIB when the
+    /// checkpoint carried none: the note set updates of every finalized
+    /// block up to the LIB slot, folded into the finalized set in batches of
+    /// `backfill_batch_slots`. Nothing is emitted. A failed batch is retried
+    /// after the reconnect delay from where it stopped. Returns `false`
+    /// while the rebuild is unfinished.
+    async fn rebuild_note_set_if_needed(&mut self) -> bool {
+        let to: u64 = self.lib_slot.into();
+        while let Some((from, set)) = self
+            .note_set_rebuild
+            .as_ref()
+            .map(|rebuild| (rebuild.next_slot, rebuild.set.clone()))
+        {
+            if from > to {
+                break;
+            }
+            let batch_end = (from + self.config.backfill_batch_slots).min(to);
+            match fold_note_set_batch(&self.node, self.channel_id, set, from, batch_end).await {
+                Ok(set) => {
+                    self.note_set_rebuild = Some(NoteSetRebuild {
+                        next_slot: batch_end + 1,
+                        set,
+                    });
+                }
+                Err(error) => {
+                    warn!(
+                        target: TARGET,
+                        from,
+                        to = batch_end,
+                        "Note set rebuild batch failed; will retry after delay: {error}"
+                    );
+                    self.wait_reconnect_delay().await;
+                    return false;
+                }
+            }
+        }
+        if let Some(rebuilt) = self.note_set_rebuild.take() {
+            info!(
+                target: TARGET,
+                notes = rebuilt.set.notes().count(),
+                "Rebuilt the channel's note set from the finalized history"
+            );
+            if let Some(state) = self.state.as_mut() {
+                state.restore_finalized_program_notes(rebuilt.set.to_checkpoint());
+            }
         }
         true
     }
@@ -317,6 +379,25 @@ where
         }
         true
     }
+}
+
+/// `set` with the note set updates of the finalized blocks of the slot range
+/// folded in.
+async fn fold_note_set_batch<Node>(
+    node: &Node,
+    channel_id: ChannelId,
+    set: ProgramNoteSet,
+    from_slot: u64,
+    to_slot: u64,
+) -> Result<ProgramNoteSet, Error>
+where
+    Node: adapter::Node + Sync,
+{
+    let updates = fetch_note_set_updates(from_slot, to_slot, channel_id, node).await?;
+    updates
+        .iter()
+        .try_fold(set, |set, update| set.apply(update))
+        .map_err(|error| Error::NoteSet(format!("slots {from_slot}..{to_slot}: {error}")))
 }
 
 /// The chain's eras as the node reports them, resolved as the node resolves

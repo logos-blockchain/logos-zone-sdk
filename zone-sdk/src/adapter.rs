@@ -372,9 +372,39 @@ where
             )));
         }
     }
-    let created = program_notes_created(transactions, channel_id);
-    let note_set = BlockNoteSet::from_events(&events, channel_id, created);
+    let note_set = block_note_set(
+        &events,
+        transactions,
+        channel_id,
+        block_id,
+        note_set_touched,
+    )?;
     Ok(ChannelBlockEvents { deposits, note_set })
+}
+
+/// What the block's events say the block did to the channel's note set. A
+/// block that appends to the set must come with its update.
+fn block_note_set(
+    events: &Events,
+    transactions: &[SignedOps<Unverified, StandardMode>],
+    channel_id: ChannelId,
+    block_id: HeaderId,
+    touched: bool,
+) -> Result<Option<BlockNoteSet>, Error> {
+    let created = program_notes_created(transactions, channel_id);
+    let note_set = BlockNoteSet::from_events(events, channel_id, created);
+    if touched && note_set.is_none() {
+        error!(
+            target: TARGET,
+            ?block_id,
+            "Block events missing the channel's note set update for a block that appends to it; \
+             expected atomic block/events visibility per node semantics"
+        );
+        return Err(Error::Server(format!(
+            "block {block_id} events missing the note set update of channel {channel_id:?}"
+        )));
+    }
+    Ok(note_set)
 }
 
 /// Walks a block's transactions and emits the [`ZoneMessage`]s relevant to
