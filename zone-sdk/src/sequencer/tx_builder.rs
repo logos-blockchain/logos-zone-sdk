@@ -6,13 +6,15 @@ use lb_core::{
         channel::{SlotTimeframe, SlotTimeout},
         ledger::verification_mode::StandardMode,
         ops::{
-            ChannelInscribeProof, Op, OpProof, OpRef, StepProof,
+            ChannelInscribeProof, NoOpProof, Op, OpProof, OpRef, StepProof,
             channel::{
                 ChannelId, ChannelKeyIndex, MsgId, VerifiedChannelKeys,
                 config::ChannelConfigOp,
                 inscribe::{Inscription, InscriptionOp, MiniBlocks, Step},
             },
+            program::ProgramRegisterOp,
         },
+        programs::ProgramVerificationKey,
         traits::{Hashable as _, MantleTx},
         transactions::{MantleTxBuilder, OpProofs, Ops, states::Unverified},
     },
@@ -254,6 +256,48 @@ pub(super) fn sign_own_tx(
     )?;
     SignedOps::from_parts(tx, ops_proofs)
         .map_err(|error| Error::Network(format!("failed to assemble signed tx: {error:?}")))
+}
+
+/// Reject a key the ledger would refuse at block assembly: every point of a
+/// registered key is on its curve and in its subgroup.
+pub(super) fn validate_program_key(key: &ProgramVerificationKey) -> Result<(), Error> {
+    key.to_groth16()
+        .map(drop)
+        .map_err(|error| Error::InvalidProgramKey(error.to_string()))
+}
+
+/// Build and fund a `ProgramRegister` transaction. Returns the signed tx and
+/// the pre-funding builder, so a stale one can be re-funded.
+pub(super) async fn create_program_register_tx<Node>(
+    node: &Node,
+    funding: &FundingConfig,
+    verification_key: ProgramVerificationKey,
+) -> Result<(SignedOps<Unverified, StandardMode>, MantleTxBuilder), Error>
+where
+    Node: adapter::Node + Sync,
+{
+    let register = ProgramRegisterOp { verification_key };
+    let (tx, transfer_proof, pre_fund) =
+        fund_ops(node, funding, vec![Op::ProgramRegister(register)]).await?;
+    Ok((sign_register_tx(tx, transfer_proof)?, pre_fund))
+}
+
+/// Prove a funded `ProgramRegister` tx: the op takes no proof, the fee
+/// transfer the node's.
+pub(super) fn sign_register_tx(
+    tx: Ops,
+    transfer_proof: Option<OpProof>,
+) -> Result<SignedOps<Unverified, StandardMode>, Error> {
+    let ops_proofs = attach_transfer_proof(&tx, [OpProof::None(NoOpProof)].into(), transfer_proof)?;
+    SignedOps::from_parts(tx, ops_proofs)
+        .map_err(|error| Error::Network(format!("failed to assemble signed tx: {error:?}")))
+}
+
+/// Whether `tx` carries a program registration.
+pub(super) fn registers_program(tx: &impl MantleTx) -> bool {
+    tx.op_refs()
+        .into_iter()
+        .any(|op| matches!(op, OpRef::ProgramRegister(_)))
 }
 
 /// Build and fund a `ChannelConfig` transaction, returning the funded raw

@@ -16,6 +16,7 @@ use lb_common_http_client::{
     ProcessedBlockEvent, Slot, State, TimeInfo,
 };
 use lb_core::{
+    crypto::Hash,
     era::ForkDigest,
     events::{Event as ChainEvent, TxEvent, TxEventPayload},
     header::{ContentId, HeaderId},
@@ -48,7 +49,7 @@ use tokio::sync::{mpsc, watch};
 use crate::{
     ZoneMessage,
     adapter::{self, BoxStream},
-    sequencer::FundingConfig,
+    sequencer::{FundingConfig, ObservedOp},
 };
 
 /// The fork digest the transactions of the tests carry.
@@ -480,4 +481,16 @@ pub fn deposit_event(tx: &SignedOps<Unverified, StandardMode>, op: &DepositOp) -
             outputs: op.outputs.clone(),
         },
     )))
+}
+
+/// The deposit op ids among `observed`, in order.
+#[must_use]
+pub fn observed_deposit_ids(observed: &[ObservedOp]) -> Vec<Hash> {
+    observed
+        .iter()
+        .filter_map(|op| match op {
+            ObservedOp::Deposit(deposit) => Some(deposit.op_id),
+            ObservedOp::ProgramRegister(_) => None,
+        })
+        .collect()
 }

@@ -10,6 +10,7 @@ use lb_core::{
                 inscribe::{Inscription, InscriptionOp, MiniBlocks},
             },
         },
+        programs::ProgramVerificationKey,
         transactions::{Ops, states::Unverified},
     },
     proofs::channel_multi_sig_proof::IndexedSignatures,
@@ -17,7 +18,7 @@ use lb_core::{
 use lb_key_management_system_service::keys::Ed25519Signature;
 
 use super::{
-    types::{Error, PreparedChannelConfig},
+    types::{Error, PreparedChannelConfig, ProgramRegisterInfo, SequencerCheckpoint},
     zone_sequencer::ZoneSequencer,
 };
 use crate::{adapter, sequencer::zone_sequencer::PublishReceipt};
@@ -89,6 +90,9 @@ where
 
     /// Build the inscription of `data` applying `mini_blocks` on the current
     /// publish tip, without publishing it.
+    ///
+    /// The returned op fixes the `op_id` the program step proofs bind. A
+    /// user step or program deposit binds its own id, not the `op_id`.
     pub fn prepare_inscription(
         &mut self,
         data: Inscription,
@@ -98,6 +102,15 @@ where
     }
 
     /// Enqueue a prepared inscription with one proof per step.
+    ///
+    /// The op is published as prepared: a stale re-fund replaces only the
+    /// fee inputs, so the `op_id` and every proof stay valid. The op is never
+    /// rebuilt silently. A publish tip that moved since
+    /// [`Self::prepare_inscription`] fails with [`Error::ChannelStateChanged`],
+    /// and an inscription that lands then drops off the canonical branch
+    /// comes back orphaned in a [`super::ChannelUpdate`] with its steps. Both
+    /// mean: prepare again, re-prove the program steps against the new
+    /// `op_id`, keep the holders' proofs, submit again.
     pub async fn submit_prepared_inscription(
         &mut self,
         op: InscriptionOp,
@@ -183,6 +196,20 @@ where
                 configuration_threshold,
             )
             .await
+    }
+
+    /// Register a program by its verification key: one funded
+    /// `ProgramRegister` op, no signature. Registering a key already
+    /// registered has no effect, so repeating the call is safe. The
+    /// sequencer re-posts and re-funds the tx until it finalizes; the
+    /// registration is reported as `ObservedOp::ProgramRegister` when its
+    /// block joins the canonical chain and as `FinalizedOp::ProgramRegister`
+    /// once final.
+    pub async fn register_program(
+        &mut self,
+        verification_key: ProgramVerificationKey,
+    ) -> Result<(ProgramRegisterInfo, SequencerCheckpoint), Error> {
+        self.sequencer.do_register_program(verification_key).await
     }
 
     /// Build and fund a channel-config tx for external multi-sig signing.

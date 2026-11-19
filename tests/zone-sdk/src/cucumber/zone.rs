@@ -13,8 +13,8 @@ use reqwest::Url;
 use tokio::task::JoinHandle;
 
 use super::steps::zone::runner::{
-    Event, IndexedSignature, InscriptionId, PreparedChannelConfig, SequencerCheckpoint,
-    SequencerClient,
+    Event, IndexedSignature, InscriptionId, PreparedChannelConfig, ProgramRegisterInfo,
+    SequencerCheckpoint, SequencerClient,
 };
 
 pub struct ZonePublishedMessage {
@@ -87,6 +87,7 @@ pub struct ZoneState {
     latest_checkpoints: HashMap<String, SequencerCheckpoint>,
     prepared_configs: HashMap<String, PreparedChannelConfig>,
     prepared_config_signatures: HashMap<String, IndexedSignatures>,
+    programs: HashMap<String, ProgramRegisterInfo>,
     sequencer_startups: HashMap<String, ZoneSequencerStartup>,
     sorted_total_payloads: Option<usize>,
     sorted_expected_by_sequencer: Option<HashMap<String, Vec<Inscription>>>,
@@ -343,6 +344,16 @@ impl ZoneState {
 
     pub fn remember_prepared_config(&mut self, alias: String, prepared: PreparedChannelConfig) {
         self.prepared_configs.insert(alias, prepared);
+    }
+
+    pub fn remember_program(&mut self, alias: String, program: ProgramRegisterInfo) {
+        self.programs.insert(alias, program);
+    }
+
+    pub fn program(&self, alias: &str) -> Result<&ProgramRegisterInfo, StepError> {
+        self.programs.get(alias).ok_or(StepError::LogicalError {
+            message: format!("Zone program '{alias}' not found"),
+        })
     }
 
     pub fn prepared_config(&self, alias: &str) -> Result<&PreparedChannelConfig, StepError> {
@@ -644,6 +655,7 @@ impl ZoneState {
         self.saved_checkpoints.clear();
         self.latest_checkpoints.clear();
         self.prepared_configs.clear();
+        self.programs.clear();
         self.prepared_config_signatures.clear();
         self.expected_custom_payloads.clear();
         self.view_violations.clear();

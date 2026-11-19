@@ -10,6 +10,7 @@ use lb_core::{
             OpId as _, OpRef,
             channel::{ChannelId, MsgId, inscribe::Inscription},
         },
+        programs::derive_program_id,
         traits::Hashable as _,
         transactions::{
             hash::TxHash,
@@ -25,7 +26,7 @@ use super::{
     state::{ChannelUpdateInfo, Displaced, TxState},
     types::{
         ChannelUpdateTx, ConfigInfo, DepositInfo, Error, FinalizedOp, FinalizedTx, InscriptionInfo,
-        PendingTx, WithdrawInfo,
+        ObservedOp, PendingTx, ProgramRegisterInfo, WithdrawInfo,
     },
 };
 use crate::{
@@ -43,11 +44,11 @@ pub(super) struct BlockEventResult {
     pub(super) channel_update: Option<ChannelUpdateInfo>,
     /// What the view held before this event, for [`common_prefix`].
     pub(super) view_before: ViewBefore,
-    /// Channel deposits that turned canonical with this event: those of the
-    /// blocks above LIB on the new tip's branch that the old tip's branch did
-    /// not hold, in block and op order. Surfaced non-finalized on
-    /// `Event::BlocksProcessed`.
-    pub(super) deposits: Vec<DepositInfo>,
+    /// Deposits and program registrations that turned canonical with this
+    /// event: those of the blocks above LIB on the new tip's branch that the
+    /// old tip's branch did not hold, in block and op order. Surfaced
+    /// non-finalized on `Event::BlocksProcessed`.
+    pub(super) observed: Vec<ObservedOp>,
 }
 
 /// The ids of the view before a block event: its lineage entries by tx hash
@@ -112,15 +113,15 @@ struct PreparedBlockEvent<'a> {
     tip_backfill: Vec<BackfillBlock>,
     our_txs: Vec<TxHash>,
     channel_txs: Vec<BlockChannelTx>,
-    /// Channel deposits of the live block.
-    deposits: Vec<DepositInfo>,
+    /// Observed ops of the live block.
+    observed: Vec<ObservedOp>,
 }
 
 /// A fetched block with what the apply phase needs from the node, so it
 /// runs without a fetch.
 struct BackfillBlock {
     block: ApiBlock,
-    deposits: Vec<DepositInfo>,
+    observed: Vec<ObservedOp>,
 }
 
 /// Process a block event. Returns finalized tx hashes and optional channel
@@ -168,7 +169,8 @@ where
         let from: u64 = lib_slot.into();
         let to: u64 = event.lib_slot.into();
         if from < to {
-            prepare_finalized_blocks(from + 1, to, channel_id, node).await?
+            let tracked = state.map(TxState::tracked_tx_hashes).unwrap_or_default();
+            prepare_finalized_blocks(from + 1, to, channel_id, &tracked, node).await?
         } else {
             Vec::new()
         }
@@ -188,13 +190,8 @@ where
         prepare_backfill_blocks(blocks, channel_id, node).await?
     };
 
-    let our_txs: Vec<TxHash> = event
-        .block
-        .transactions
-        .iter()
-        .filter(|tx| touches_channel_tip(tx, channel_id))
-        .map(|tx| tx.op_refs().hash())
-        .collect();
+    let tracked = state.map(TxState::tracked_tx_hashes).unwrap_or_default();
+    let our_txs = block_our_txs(&event.block.transactions, channel_id, &tracked);
     let channel_txs = classify_channel_txs(&event.block.transactions, channel_id);
 
     // Deposit events for the live block: fetched here (the prepare phase) so
@@ -206,7 +203,7 @@ where
         channel_id,
     )
     .await?;
-    let deposits = block_channel_deposits(
+    let observed = block_observed_ops(
         &event.block.transactions,
         channel_id,
         event.block.header.slot,
@@ -244,24 +241,40 @@ where
         tip_backfill,
         our_txs,
         channel_txs,
-        deposits,
+        observed,
     })
 }
 
-/// The channel deposits in a single block, in on-chain op order — the
-/// non-finalized counterpart of the finalized deposit stream.
-fn block_channel_deposits(
+/// The txs of a block the sequencer must see mined: those touching the
+/// channel tip and those it tracks itself, whatever their ops.
+fn block_our_txs(
+    transactions: &[SignedOps<Unverified, StandardMode>],
+    channel_id: ChannelId,
+    tracked: &HashSet<TxHash>,
+) -> Vec<TxHash> {
+    transactions
+        .iter()
+        .map(|tx| (tx, tx.op_refs().hash()))
+        .filter(|(tx, hash)| touches_channel_tip(tx, channel_id) || tracked.contains(hash))
+        .map(|(_, hash)| hash)
+        .collect()
+}
+
+/// The channel deposits and program registrations in a single block, in
+/// on-chain op order — the non-finalized counterpart of the finalized stream.
+fn block_observed_ops(
     transactions: &[SignedOps<Unverified, StandardMode>],
     channel_id: ChannelId,
     l1_slot: Slot,
     deposit_events: &DepositEvents,
-) -> Vec<DepositInfo> {
+) -> Vec<ObservedOp> {
     extract_finalized_items(transactions, channel_id, l1_slot, deposit_events)
         .into_iter()
         .flat_map(|item| item.ops)
         .filter_map(|op| match op {
-            FinalizedOp::Deposit(d) => Some(d),
-            _ => None,
+            FinalizedOp::Deposit(deposit) => Some(ObservedOp::Deposit(deposit)),
+            FinalizedOp::ProgramRegister(program) => Some(ObservedOp::ProgramRegister(program)),
+            FinalizedOp::Inscription(_) | FinalizedOp::Withdraw(_) | FinalizedOp::Config(_) => None,
         })
         .collect()
 }
@@ -284,7 +297,7 @@ fn apply_prepared_block_event(
         tip_backfill,
         our_txs,
         channel_txs,
-        deposits,
+        observed,
     } = prepared;
 
     if state.is_none() {
@@ -332,7 +345,7 @@ fn apply_prepared_block_event(
         lib,
         our_txs,
         channel_txs,
-        deposits,
+        observed,
     );
 
     // Then the reported tip's branch, which may build on the event block.
@@ -355,9 +368,9 @@ fn apply_prepared_block_event(
 
     mirror_branch_from_store(s, tip, channel_id);
 
-    // A fork block's deposits wait for its branch to win the tip, like its
-    // inscriptions do.
-    let deposits = s.deposits_newly_canonical(old_tip, tip);
+    // A fork block's observed ops wait for its branch to win the tip, like
+    // its inscriptions do.
+    let observed = s.observed_newly_canonical(old_tip, tip);
 
     // Detect channel changes by diffing the channel view on every block. On
     // the first event there is no old tip: what restored pending chains on
@@ -387,7 +400,7 @@ fn apply_prepared_block_event(
         finalized_items: finalized_batch.items,
         channel_update,
         view_before,
-        deposits,
+        observed,
     }
 }
 
@@ -528,6 +541,7 @@ async fn prepare_finalized_blocks<Node>(
     from_slot: u64,
     to_slot: u64,
     channel_id: ChannelId,
+    tracked: &HashSet<TxHash>,
     node: &Node,
 ) -> Result<Vec<PreparedFinalizedBlock>, Error>
 where
@@ -545,13 +559,7 @@ where
 
     let mut prepared = Vec::with_capacity(blocks.len());
     for block in blocks {
-        let our_txs: Vec<TxHash> = block
-            .transactions
-            .iter()
-            .filter(|tx| touches_channel_tip(tx, channel_id))
-            .map(|tx| tx.op_refs().hash())
-            .collect();
-
+        let our_txs = block_our_txs(&block.transactions, channel_id, tracked);
         let channel_txs = classify_channel_txs(&block.transactions, channel_id);
 
         // Fetch + validate deposit events for this block BEFORE mutating
@@ -635,7 +643,8 @@ pub(super) async fn fetch_and_process_blocks<Node>(
 where
     Node: adapter::Node + Sync,
 {
-    let prepared = prepare_finalized_blocks(from_slot, to_slot, channel_id, node).await?;
+    let tracked = state.tracked_tx_hashes();
+    let prepared = prepare_finalized_blocks(from_slot, to_slot, channel_id, &tracked, node).await?;
 
     Ok(apply_finalized_blocks(state, prepared))
 }
@@ -733,6 +742,13 @@ fn extract_finalized_items(
                         op: (*withdraw).clone(),
                     }));
                 }
+                OpRef::ProgramRegister(register) => {
+                    ops.push(FinalizedOp::ProgramRegister(ProgramRegisterInfo {
+                        tx_hash,
+                        program_id: derive_program_id(&register.verification_key),
+                        verification_key: register.verification_key.clone(),
+                    }));
+                }
                 _ => {}
             }
         }
@@ -792,10 +808,10 @@ where
     Ok(blocks)
 }
 
-/// Prepare each canonical-backfill block with the deposits it carries, in
-/// block order. Each block needs a deposit-events fetch, so this runs in the
-/// prepare phase, keeping apply await-free; a failed fetch fails the event,
-/// like the live block's.
+/// Prepare each canonical-backfill block with the observed ops it carries,
+/// in block order. Each block needs a deposit-events fetch, so this runs in
+/// the prepare phase, keeping apply await-free; a failed fetch fails the
+/// event, like the live block's.
 async fn prepare_backfill_blocks<Node>(
     blocks: Vec<ApiBlock>,
     channel_id: ChannelId,
@@ -809,13 +825,13 @@ where
         let deposit_events =
             fetch_block_deposit_events(node, block.header.id, &block.transactions, channel_id)
                 .await?;
-        let deposits = block_channel_deposits(
+        let observed = block_observed_ops(
             &block.transactions,
             channel_id,
             block.header.slot,
             &deposit_events,
         );
-        prepared.push(BackfillBlock { block, deposits });
+        prepared.push(BackfillBlock { block, observed });
     }
     Ok(prepared)
 }
@@ -847,21 +863,15 @@ fn apply_backfilled_block(
     channel_id: ChannelId,
     lib: HeaderId,
 ) {
-    let BackfillBlock { block, deposits } = backfill;
+    let BackfillBlock { block, observed } = backfill;
     let block_id = block.header.id;
     let parent_id = block.header.parent_block;
 
-    let our_txs: Vec<TxHash> = block
-        .transactions
-        .iter()
-        .filter(|tx| touches_channel_tip(tx, channel_id))
-        .map(|tx| tx.op_refs().hash())
-        .collect();
-
+    let our_txs = block_our_txs(&block.transactions, channel_id, &state.tracked_tx_hashes());
     let channel_txs = classify_channel_txs(&block.transactions, channel_id);
 
     // Use current state lib to avoid premature finalization
-    state.process_block(block_id, parent_id, lib, our_txs, channel_txs, deposits);
+    state.process_block(block_id, parent_id, lib, our_txs, channel_txs, observed);
 }
 
 /// Classify a block's channel-touching txs in tx-then-op order: a `publish`

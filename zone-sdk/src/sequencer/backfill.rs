@@ -79,7 +79,10 @@ where
             .flat_map(|t| t.ops.iter().rev())
             .find_map(|op| match op {
                 FinalizedOp::Inscription(i) => Some(i),
-                FinalizedOp::Deposit(_) | FinalizedOp::Withdraw(_) | FinalizedOp::Config(_) => None,
+                FinalizedOp::Deposit(_)
+                | FinalizedOp::Withdraw(_)
+                | FinalizedOp::Config(_)
+                | FinalizedOp::ProgramRegister(_) => None,
             })
         {
             self.last_msg_id = last_inscription.this_msg;
@@ -100,7 +103,8 @@ where
                 FinalizedOp::Config(c) => Some(c),
                 FinalizedOp::Inscription(_)
                 | FinalizedOp::Deposit(_)
-                | FinalizedOp::Withdraw(_) => None,
+                | FinalizedOp::Withdraw(_)
+                | FinalizedOp::ProgramRegister(_) => None,
             })
             && let Some(s) = self.state.as_mut()
         {
@@ -130,11 +134,11 @@ where
         self.buffered_events.push_back(Event::BlocksProcessed {
             checkpoint,
             // Backfill is finalized history: nothing sits above LIB, and
-            // deposits surface via `finalized`.
+            // its ops surface via `finalized`.
             channel_update: ChannelUpdate::Extension {
                 adopted: Vec::new(),
             },
-            deposits: Vec::new(),
+            observed: Vec::new(),
             finalized: batch.items,
         });
         Some(self.buffered_events.pop_front())

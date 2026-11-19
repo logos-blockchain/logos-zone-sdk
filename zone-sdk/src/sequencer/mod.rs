@@ -102,8 +102,8 @@ pub use lb_key_management_system_service::keys::{Ed25519Key, UnverifiedEd25519Pu
 pub use tx_builder::sign_prepared;
 pub use types::{
     ChannelUpdate, ChannelUpdateTx, ConfigInfo, DepositInfo, Error, Event, FinalizedOp,
-    FinalizedTx, FundingConfig, InscriptionId, InscriptionInfo, PendingFunding, PendingTx,
-    PreparedChannelConfig, PublishResult, SequencerChannelView, SequencerCheckpoint,
-    SequencerConfig, TurnNotification, WithdrawInfo,
+    FinalizedTx, FundingConfig, InscriptionId, InscriptionInfo, ObservedOp, PendingFunding,
+    PendingTx, PreparedChannelConfig, ProgramRegisterInfo, PublishResult, SequencerChannelView,
+    SequencerCheckpoint, SequencerConfig, TurnNotification, WithdrawInfo,
 };
 pub use zone_sequencer::ZoneSequencer;

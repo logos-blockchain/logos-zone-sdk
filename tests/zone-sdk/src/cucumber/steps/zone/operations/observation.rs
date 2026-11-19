@@ -427,3 +427,113 @@ pub async fn wait_for_lib_advance(
     .await
     .map_err(|_| ZoneTestError::LibAdvanceTimeout)?
 }
+
+/// Registers `verification_key` through the sequencer, retrying while the
+/// node wallet has not caught up with the notes a previous tx left it.
+pub async fn register_program_with_retry(
+    client: &SequencerClient,
+    verification_key: &ProgramVerificationKey,
+    deadline: PublishDeadline,
+) -> Result<(ProgramRegisterInfo, SequencerCheckpoint), ZoneTestError> {
+    loop {
+        if deadline.is_expired() {
+            return Err(ZoneTestError::PublishTimeout);
+        }
+        match client.register_program(verification_key.clone()).await {
+            Ok(registered) => return Ok(registered),
+            Err(error) => {
+                warn!(error = %error, "Zone sequencer register_program failed, retrying");
+                sleep(Duration::from_millis(500)).await;
+            }
+        }
+    }
+}
+
+/// Waits until the finalized channel history replayed from the indexer
+/// carries the registration of `program_id`.
+pub async fn wait_for_finalized_program(
+    reader: &ZoneReaderConfig,
+    program_id: ProgramId,
+    duration: Duration,
+) -> Result<(), ZoneTestError> {
+    timeout(duration, async {
+        loop {
+            let registered = replay_finalized_history(reader)
+                .await?
+                .iter()
+                .flat_map(|tx| tx.ops.iter())
+                .any(|op| matches!(op, FinalizedOp::ProgramRegister(p) if p.program_id == program_id));
+            if registered {
+                return Ok(());
+            }
+            sleep(Duration::from_millis(500)).await;
+        }
+    })
+    .await
+    .map_err(|_| ZoneTestError::IndexerTimeout)?
+}
+
+/// Waits until the sequencer's event stream reports the registration of
+/// `program_id` observed on the canonical branch.
+pub async fn wait_for_observed_program(
+    events: &mut tokio::sync::broadcast::Receiver<Event>,
+    program_id: ProgramId,
+    duration: Duration,
+) -> Result<(), ZoneTestError> {
+    wait_for_block_event(events, duration, |observed, _| {
+        observed
+            .iter()
+            .any(|op| matches!(op, ObservedOp::ProgramRegister(p) if p.program_id == program_id))
+    })
+    .await
+}
+
+/// Waits until the sequencer's event stream reports the registration of
+/// `program_id` finalized.
+pub async fn wait_for_finalized_program_via_sequencer(
+    events: &mut tokio::sync::broadcast::Receiver<Event>,
+    program_id: ProgramId,
+    duration: Duration,
+) -> Result<(), ZoneTestError> {
+    wait_for_block_event(events, duration, |_, finalized| {
+        finalized
+            .iter()
+            .flat_map(|tx| tx.ops.iter())
+            .any(|op| matches!(op, FinalizedOp::ProgramRegister(p) if p.program_id == program_id))
+    })
+    .await
+}
+
+/// Drains `events` until a `BlocksProcessed` satisfies `found` on its
+/// observed and finalized ops.
+async fn wait_for_block_event(
+    events: &mut tokio::sync::broadcast::Receiver<Event>,
+    duration: Duration,
+    mut found: impl FnMut(&[ObservedOp], &[FinalizedTx]) -> bool,
+) -> Result<(), ZoneTestError> {
+    timeout(duration, async {
+        loop {
+            let event = match events.recv().await {
+                Ok(event) => event,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    warn!("event subscriber lagged by {n}, recovering");
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    return Err(ZoneTestError::SequencerStopped);
+                }
+            };
+            if let Event::BlocksProcessed {
+                observed,
+                finalized,
+                ..
+            } = event
+                && found(&observed, &finalized)
+            {
+                return Ok(());
+            }
+        }
+    })
+    .await
+    .map_err(|_| ZoneTestError::IndexerTimeout)?
+}

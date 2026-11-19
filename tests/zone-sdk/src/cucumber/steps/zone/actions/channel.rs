@@ -4,7 +4,7 @@ use super::{
     log_step_error, timeout,
 };
 
-pub(in super::super) async fn submit_zone_channel_config(
+pub async fn submit_zone_channel_config(
     world: &mut ZoneWorld,
     step: &Step,
     sequencer_alias: &str,
@@ -67,7 +67,7 @@ pub(in super::super) async fn submit_zone_channel_config(
 
 /// `threshold` sets both the config and transfer thresholds;
 /// `posting_timeframe` is in slots (0 = no rotation).
-pub(in super::super) async fn prepare_zone_channel_config(
+pub async fn prepare_zone_channel_config(
     world: &mut ZoneWorld,
     step: &Step,
     sequencer_alias: &str,
@@ -116,7 +116,7 @@ pub(in super::super) async fn prepare_zone_channel_config(
 }
 
 /// Signs using only `signer_alias`'s own key.
-pub(in super::super) fn sign_prepared_zone_channel_config(
+pub fn sign_prepared_zone_channel_config(
     world: &mut ZoneWorld,
     step: &Step,
     signer_alias: &str,
@@ -143,7 +143,7 @@ pub(in super::super) fn sign_prepared_zone_channel_config(
     Ok(())
 }
 
-pub(in super::super) async fn submit_prepared_zone_channel_config(
+pub async fn submit_prepared_zone_channel_config(
     world: &mut ZoneWorld,
     step: &Step,
     sequencer_alias: &str,
@@ -223,16 +223,13 @@ async fn record_submitted_config(
     Ok(())
 }
 
-pub(in super::super) fn stop_zone_sequencer(
-    world: &mut ZoneWorld,
-    sequencer_alias: impl AsRef<str>,
-) -> StepResult {
+pub fn stop_zone_sequencer(world: &mut ZoneWorld, sequencer_alias: impl AsRef<str>) -> StepResult {
     world.zone.stop_sequencer(sequencer_alias.as_ref())?;
 
     Ok(())
 }
 
-pub(in super::super) fn save_zone_checkpoint(
+pub fn save_zone_checkpoint(
     world: &mut ZoneWorld,
     step: &Step,
     sequencer_alias: impl AsRef<str>,
@@ -246,7 +243,7 @@ pub(in super::super) fn save_zone_checkpoint(
     Ok(())
 }
 
-pub(in super::super) fn remember_published_zone_message(
+pub fn remember_published_zone_message(
     world: &mut ZoneWorld,
     sequencer_alias: &str,
     message_alias: String,
