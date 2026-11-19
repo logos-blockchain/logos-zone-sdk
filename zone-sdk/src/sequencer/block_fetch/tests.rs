@@ -2,6 +2,7 @@ use std::{collections::HashMap, num::NonZero};
 
 use lb_core::{
     crypto::Hash,
+    events::Events,
     mantle::{
         Op,
         channel::{SlotTimeframe, SlotTimeout},
@@ -703,8 +704,10 @@ async fn missing_note_set_update_fails_the_block_event() {
         1,
         vec![unverified_tx_with_ops(vec![Op::ChannelInscribe(op)])],
     );
+    // The block's events exist but carry no update of the channel's set.
     let node = MockNode {
         blocks: vec![b1.clone()],
+        events: HashMap::from([(header_id(1), Events::new())]),
         ..MockNode::default()
     };
     let mut state = None;

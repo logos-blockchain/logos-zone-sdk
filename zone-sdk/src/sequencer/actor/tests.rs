@@ -2524,12 +2524,23 @@ async fn a_checkpoint_without_program_notes_rebuilds_the_set_from_the_finalized_
         )))
     };
     let b2_tx = unverified_tx_with_ops(vec![Op::ChannelDeposit(deposit.clone())]);
-    let mut b2_events = crate::test_support::deposit_event(&b2_tx, &deposit);
-    b2_events.extend(update(vec![foreign(2)]));
+    let b2_events = crate::test_support::deposit_event(&b2_tx, &deposit);
+    // The live block above LIB, whose processing makes the sequencer ready.
+    let b3 = api_block(3, 2, 3, vec![]);
     let node = MockNode {
         lib: header_id(2),
         tip: header_id(2),
         lib_slot: Slot::from(2u64),
+        scripts: scripts(vec![StreamScript {
+            events: vec![ProcessedBlockEvent {
+                block: b3.clone(),
+                tip: b3.header.id,
+                tip_slot: b3.header.slot,
+                lib: header_id(2),
+                lib_slot: Slot::from(2u64),
+            }],
+            then: StreamEnd::Hang,
+        }]),
         immutable: vec![b1, b2],
         events: HashMap::from([
             (header_id(1), update(vec![foreign(1), commitment])),
@@ -2573,8 +2584,9 @@ async fn a_checkpoint_without_program_notes_rebuilds_the_set_from_the_finalized_
     let note = &view.finalized[0];
     assert_eq!(note.commitment, commitment);
     assert_eq!(note.opening, opening);
-    let expected_root = [foreign(1), commitment, foreign(2)]
+    let expected_root = [foreign(1), commitment]
         .iter()
+        .chain(deposit.outputs.iter())
         .fold(CommitmentMmr::new(), |mmr, commitment| {
             mmr.push(*commitment).unwrap()
         })
