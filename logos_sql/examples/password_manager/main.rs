@@ -1,16 +1,8 @@
 //! A password manager built on `λSQL`.
 //!
-//! Accounts, passwords and notes are encrypted before being passed to `λSQL`.
-//! Labels and write activity remain public. This is still a demonstration,
-//! not an audited password manager; use test credentials only.
-//!
-//! Generate a separate encryption key with `umask 077; openssl rand -out
-//! vault.key 32` and pass `--encryption-key-file vault.key`. Keep this file
-//! private and backed up, and copy it securely to each app instance using the
-//! same channel. Losing the key means losing access to the encrypted data. Do
-//! not reuse the channel signing key. Key rotation and plaintext-data migration
-//! are not supported. Use a fresh channel: encrypting new writes cannot hide
-//! old plaintext history.
+//! This first version stores and replicates passwords in plaintext. It exists
+//! only to demonstrate the `λSQL` application API. Do not enter real
+//! credentials. Application-side encryption will be added in a follow-up.
 //!
 //! Run with `--help` to see startup configuration. Each option also accepts its
 //! corresponding `LOGOS_SQL_*` environment variable. After startup, enter
@@ -39,8 +31,7 @@
 //! successful retry marks that displacement handled; a failed retry leaves it
 //! available for review.
 //!
-//! Password edits check the stored password ciphertext, and notes edits check
-//! the stored notes ciphertext. Retries reuse those exact encrypted values.
+//! Password edits check the old password, and notes edits check the old notes.
 //! Changing notes does not prevent a password retry, but changing the password
 //! does. Deletes only remove an entry if its account, password, and notes still
 //! match what the app read when preparing the command. This prevents a retried
@@ -58,13 +49,14 @@
 //! Marking a displacement handled clears it from the review list.
 //! It does not change the database or channel history.
 //!
-//! An old add can succeed again after deletion. This is why retries are a user
-//! decision, not a background loop.
+//! These checks compare values, not edit
+//! history: an old add can succeed again after deletion, and a condition can
+//! pass again if a value changes back. This is why retries are a user decision,
+//! not a background loop.
 //!
 //! Use a fresh channel and state directory for this example.
 
 mod config;
-mod encryption;
 mod passwords;
 mod repl;
 
@@ -97,21 +89,11 @@ enum AppError {
 
     #[error("displacement not listed; run `displacements` to review it first")]
     DisplacementNotListed,
-
-    #[error("encryption key file must contain exactly 32 random bytes")]
-    InvalidEncryptionKey,
-
-    #[error("could not encrypt credential")]
-    EncryptionFailed,
-
-    #[error("could not decrypt credential: incorrect key or modified data")]
-    DecryptionFailed,
 }
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> AppResult<()> {
-    let (config, encryption) = config::from_args()?;
-    let manager = PasswordManager::start(config, encryption).await?;
+    let manager = PasswordManager::start(config::from_args()).await?;
 
     let result = repl::run(&manager).await;
 

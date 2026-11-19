@@ -48,8 +48,8 @@ pub enum Error {
     #[error("invalid local state: {0}")]
     InvalidLocalState(&'static str),
 
-    /// The local publication queue is full or its SDK checkpoint needs saving.
-    #[error("publication is pending; retry once the local queue can accept writes")]
+    /// A local write is committed but has not yet been accepted by `ZoneSDK`.
+    #[error("a committed write is still waiting for ZoneSDK to accept it")]
     PublishPending,
 
     /// The encoded transaction does not conform to the `λSQL` protocol.
@@ -60,10 +60,6 @@ pub enum Error {
     /// `SQLite`.
     #[error("channel SQL was rejected: {0}")]
     RejectedSql(#[source] rusqlite::Error),
-
-    /// The application transaction exceeded the SQLite execution allowance.
-    #[error("SQL transaction exceeded its execution budget")]
-    ExecutionBudgetExceeded,
 
     /// The encoded payload exceeds the inscription limit.
     #[error("transaction is too large for one inscription")]

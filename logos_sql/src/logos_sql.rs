@@ -1,9 +1,6 @@
 //! Application entry point: a running `λSQL` participant.
 
-use std::{
-    num::{NonZeroU16, NonZeroUsize},
-    path::PathBuf,
-};
+use std::path::PathBuf;
 
 use lb_key_management_system_service::keys::{Ed25519Key, ZkPublicKey};
 use lb_zone_sdk::{
@@ -37,45 +34,17 @@ pub struct LogosSqlConfig {
     pub writer: Option<WriterConfig>,
 }
 
-/// Credentials and publication preferences for publishing to the channel.
+/// Credentials needed to publish writes to the channel.
 pub struct WriterConfig {
     /// Key used to sign published inscriptions.
     pub signing_key: Ed25519Key,
     /// Fee funding for published transactions.
     pub funding: FundingConfig,
-    /// Publication size and local backpressure settings.
-    pub publication: PublicationConfig,
-}
-
-/// Local publication preferences. Replicas can read batches of any supported
-/// size.
-///
-/// Defaults to 1,024 transactions per inscription and 8,192 queued writes.
-#[derive(Clone, Copy, Debug)]
-pub struct PublicationConfig {
-    /// Maximum SQL transactions in one inscription. Byte limits can make a
-    /// batch smaller. Larger batches share publication fees across more writes.
-    pub max_transactions: NonZeroU16,
-    /// Maximum writes waiting for SDK publication. A full queue rejects new
-    /// writes with [`Error::PublishPending`] before committing them locally.
-    /// A separate 64 MiB byte limit also bounds the queue.
-    /// Larger queues absorb bursts but allow more unpublished local work to
-    /// accumulate; they do not increase the channel's capacity.
-    pub max_pending_writes: NonZeroUsize,
-}
-
-impl Default for PublicationConfig {
-    fn default() -> Self {
-        Self {
-            max_transactions: NonZeroU16::new(1024).unwrap(),
-            max_pending_writes: NonZeroUsize::new(8192).unwrap(),
-        }
-    }
 }
 
 /// A running `λSQL` database.
 ///
-/// `LogosSql` owns one background task on a dedicated thread. It owns both the
+/// `LogosSql` owns one background task. That task is the only owner of both the
 /// `ZoneSDK` sequencer and the database writer. Dropping `LogosSql` aborts the
 /// task; call [`Self::shutdown`] to stop it gracefully and observe errors.
 pub struct LogosSql {
@@ -97,26 +66,33 @@ impl LogosSql {
     ///
     /// Returns an error if no Tokio runtime is active, the local state cannot
     /// be opened, or the replication task stops before becoming ready.
-    /// Read-only startup also rejects state with pending local publications.
+    /// Read-only startup also rejects state with pending publications.
     pub async fn start(config: LogosSqlConfig) -> Result<Self, Error> {
         tokio::runtime::Handle::try_current().map_err(|_| Error::RuntimeUnavailable)?;
 
-        let publication = config
-            .writer
-            .as_ref()
-            .map_or_else(PublicationConfig::default, |writer| writer.publication);
-        let db = Databases::open(&config.state_dir, publication.max_pending_writes)?;
+        let db = Databases::open(&config.state_dir)?;
         let lib_path = db.lib_path().to_owned();
         let live_path = db.live_path().to_owned();
         let checkpoint = db.load_checkpoint()?;
         let node = NodeHttpClient::new(CommonHttpClient::new(None), config.node_url);
 
         let read_only = config.writer.is_none();
-        let writer = config.writer.unwrap_or_else(|| {
+        let writer = if let Some(writer) = config.writer {
+            writer
+        } else {
+            if db.pending_publish()?.is_some()
+                || checkpoint
+                    .as_ref()
+                    .is_some_and(|cp| !cp.pending_txs.is_empty())
+            {
+                return Err(Error::InvalidLocalState(
+                    "read-only startup cannot resume pending publications",
+                ));
+            }
+
             // ZoneSDK's observer setup still requires a key and funding config.
             // Use a fresh key and inert funding; the runtime blocks publication.
             WriterConfig {
-                publication,
                 signing_key: Ed25519Key::generate(&mut OsRng),
                 funding: FundingConfig {
                     funding_pk: ZkPublicKey::zero(),
@@ -125,7 +101,7 @@ impl LogosSql {
                     priority_fee_percent: 0,
                 },
             }
-        });
+        };
 
         let sequencer = ZoneSequencer::init(
             config.channel_id,
@@ -135,14 +111,7 @@ impl LogosSql {
             checkpoint.clone(),
         );
 
-        let runtime = runtime::spawn(
-            sequencer,
-            db,
-            config.channel_id,
-            checkpoint,
-            read_only,
-            publication.max_transactions,
-        )?;
+        let runtime = runtime::spawn(sequencer, db, config.channel_id, checkpoint, read_only);
 
         let mut logos_sql = Self {
             lib_path,
@@ -180,8 +149,6 @@ impl LogosSql {
     ///
     /// A successful return means the SQL effects and recovery record are
     /// committed locally. Publication and finality remain asynchronous.
-    /// Nearby writes share an inscription, but each remains a separate SQL
-    /// transaction with its own identity and outcome.
     /// [`TransactionBuilder::tx_id`] exposes the same identity before the
     /// asynchronous call, allowing the application to record how transaction
     /// outcomes map to its own operations.
@@ -338,21 +305,16 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{LogosSql, LogosSqlConfig};
-    use crate::{
-        db::tests::{MAX_INSCRIPTION_SIZE, open_databases},
-        error::Error,
-        sql::TransactionBuilder,
-    };
+    use crate::{db::Databases, error::Error, sql::TransactionBuilder};
 
     #[tokio::test]
     async fn read_only_start_does_not_abandon_a_pending_write() {
         let directory = TempDir::new().unwrap();
-        let mut db = open_databases(directory.path()).unwrap();
+        let mut db = Databases::open(directory.path()).unwrap();
         let (tx_id, transaction) = TransactionBuilder::new("CREATE TABLE items(value INTEGER)")
             .finish()
             .unwrap();
-        db.commit_local_write(tx_id, &transaction, MAX_INSCRIPTION_SIZE)
-            .unwrap();
+        db.commit_local_write(tx_id, &transaction).unwrap();
         drop(db);
 
         let result = LogosSql::start(LogosSqlConfig {
@@ -365,7 +327,7 @@ mod tests {
 
         assert!(matches!(result, Err(Error::InvalidLocalState(_))));
 
-        let db = open_databases(directory.path()).unwrap();
+        let db = Databases::open(directory.path()).unwrap();
         assert_eq!(db.pending_publish().unwrap().unwrap().tx_id, tx_id);
     }
 }

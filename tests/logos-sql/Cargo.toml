@@ -1,6 +1,6 @@
 [package]
 categories  = { workspace = true }
-description = "Logos SQL integration tests and settlement benchmark"
+description = "Logos SQL integration tests"
 edition     = { workspace = true }
 keywords    = { workspace = true }
 license     = { workspace = true }
@@ -12,25 +12,11 @@ version     = { workspace = true }
 [lints]
 workspace = true
 
-[dependencies]
-cucumber                    = { features = ["macros", "output-junit"], workspace = true }
-futures                     = { workspace = true }
-hex                         = { workspace = true }
-lb-common-http-client       = { workspace = true }
-lb-core                     = { workspace = true }
-lb-groth16                  = { workspace = true }
-lb-testing-framework        = { workspace = true }
-lb-zone-sdk                 = { workspace = true }
-logos-blockchain-tests      = { workspace = true }
-logos-blockchain-zone-tests = { workspace = true }
-logos-sql                   = { workspace = true }
-rand                        = { workspace = true }
-rusqlite                    = { workspace = true }
-serde                       = { features = ["derive"], workspace = true }
-serde_json                  = { workspace = true }
-thiserror                   = { workspace = true }
-tokio                       = { workspace = true }
-tracing                     = { workspace = true }
+[dev-dependencies]
+cucumber               = { features = ["macros", "output-junit"], workspace = true }
+lb-testing-framework   = { workspace = true }
+logos-blockchain-tests = { workspace = true }
+tokio                  = { features = ["macros", "rt-multi-thread"], workspace = true }
 
 [features]
 cucumber = []
@@ -38,5 +24,5 @@ cucumber = []
 [[test]]
 harness           = false
 name              = "cucumber"
-path              = "tests/cucumber.rs"
+path              = "../zone-sdk/tests/cucumber.rs"
 required-features = ["cucumber"]
