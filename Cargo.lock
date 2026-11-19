@@ -4780,7 +4780,7 @@ dependencies = [
 
 [[package]]
 name = "logos-blockchain-sql-tests"
-version = "0.0.0"
+version = "0.3.6"
 dependencies = [
  "cucumber",
  "logos-blockchain-tests",
@@ -5096,7 +5096,7 @@ dependencies = [
 
 [[package]]
 name = "logos-blockchain-zone-sdk"
-version = "0.0.0"
+version = "0.3.6"
 dependencies = [
  "async-trait",
  "futures",
@@ -5124,7 +5124,7 @@ dependencies = [
 
 [[package]]
 name = "logos-blockchain-zone-tests"
-version = "0.0.0"
+version = "0.3.6"
 dependencies = [
  "cucumber",
  "logos-blockchain-tests",
@@ -5134,7 +5134,7 @@ dependencies = [
 
 [[package]]
 name = "logos-sql"
-version = "0.0.0"
+version = "0.3.6"
 dependencies = [
  "bincode",
  "blake2",
