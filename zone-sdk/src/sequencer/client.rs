@@ -20,8 +20,8 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use super::{
     types::{
-        Error, Event, PreparedChannelConfig, ProgramRegisterInfo, SequencerChannelView,
-        SequencerCheckpoint, TurnNotification,
+        Error, Event, PreparedChannelConfig, ProgramNotesView, ProgramRegisterInfo,
+        SequencerChannelView, SequencerCheckpoint, TurnNotification,
     },
     zone_sequencer::ActorRequest,
 };
@@ -230,6 +230,14 @@ impl SequencerClient {
             response_tx,
         })?;
         Self::recv(response_rx).await?
+    }
+
+    /// The channel's program notes a new step may consume, served by the
+    /// drive task — see [`super::ZoneSequencer::program_notes`].
+    pub async fn program_notes(&self) -> Result<ProgramNotesView, Error> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.send(ActorRequest::ProgramNotes { response_tx })?;
+        Self::recv(response_rx).await
     }
 
     /// Subscribe to the broadcast channel of events.

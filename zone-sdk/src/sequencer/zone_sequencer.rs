@@ -47,8 +47,9 @@ use super::{
     },
     types::{
         ChannelUpdateTx, Error, Event, FundingConfig, InscriptionInfo, PendingTx,
-        PreparedChannelConfig, ProgramRegisterInfo, PublishResult, SequencerChannelView,
-        SequencerCheckpoint, SequencerConfig, TurnNotification,
+        PreparedChannelConfig, ProgramNotesCheckpoint, ProgramNotesView, ProgramRegisterInfo,
+        PublishResult, SequencerChannelView, SequencerCheckpoint, SequencerConfig,
+        TurnNotification,
     },
 };
 use crate::{InscriptionSteps, adapter, adapter::BoxStream, inscribes};
@@ -223,6 +224,9 @@ pub(super) enum ActorRequest {
         tx: Ops,
         response_tx: oneshot::Sender<Result<Ed25519Signature, Error>>,
     },
+    ProgramNotes {
+        response_tx: oneshot::Sender<ProgramNotesView>,
+    },
 }
 
 impl<Node> ZoneSequencer<Node>
@@ -273,11 +277,13 @@ where
                 lib_slot,
                 finalized_config,
                 funding,
+                program_notes,
             } = cp;
             let finalized_msg =
                 restored_pending_channel_tip(&pending_txs, channel_id).unwrap_or(last_msg_id);
             let mut tx_state = TxState::new(lib, finalized_msg);
             tx_state.set_finalized_config(finalized_config);
+            restore_program_notes(&mut tx_state, program_notes);
             for (hash, tx) in pending_txs {
                 if let Err(taken) = track_pending_tx(&mut tx_state, tx, channel_id) {
                     warn!(target: TARGET, "Dropping checkpointed tx {hash:?}: {taken}");
@@ -409,6 +415,18 @@ where
     #[must_use]
     pub const fn is_connected(&self) -> bool {
         self.connected
+    }
+
+    /// The channel's program notes a new step may consume at the current
+    /// tip, with their paths against the view's root. Empty when no tip is
+    /// known yet.
+    #[must_use]
+    pub fn program_notes(&self) -> ProgramNotesView {
+        self.state
+            .as_ref()
+            .map_or_else(ProgramNotesView::empty, |state| {
+                state.program_notes(self.current_tip)
+            })
     }
 
     /// Current persistence checkpoint, if one has been produced.
@@ -690,6 +708,9 @@ where
             }
             ActorRequest::SignTx { tx, response_tx } => {
                 drop(response_tx.send(self.do_sign_tx(&tx)));
+            }
+            ActorRequest::ProgramNotes { response_tx } => {
+                drop(response_tx.send(self.program_notes()));
             }
         }
     }
@@ -1331,6 +1352,21 @@ pub(super) fn build_checkpoint(
         lib_slot,
         finalized_config: state.finalized_config(),
         funding: state.funding_records(),
+        program_notes: Some(state.finalized_program_notes()),
+    }
+}
+
+/// Seeds the finalized note set from the checkpoint. A checkpoint without
+/// one leaves the set empty at LIB: paths are then only valid for the notes
+/// created from here on.
+fn restore_program_notes(state: &mut TxState, checkpoint: Option<ProgramNotesCheckpoint>) {
+    if let Some(notes) = checkpoint {
+        state.restore_finalized_program_notes(notes);
+    } else {
+        warn!(
+            target: TARGET,
+            "Checkpoint carries no program notes; the channel's note set starts empty at LIB"
+        );
     }
 }
 

@@ -246,7 +246,15 @@ fn deposit_plus_inscription_is_adopted_as_custom() {
     let mut state = TxState::new(genesis, MsgId::root());
     let old_lineage = state.channel_lineage(genesis);
     mirror_channel_txs(&mut state, &classified, channel_id);
-    state.process_block(block, genesis, genesis, vec![tx_hash], classified, vec![]);
+    state.process_block(
+        block,
+        genesis,
+        genesis,
+        vec![tx_hash],
+        classified,
+        vec![],
+        None,
+    );
 
     assert!(
         state.is_tracked(&tx_hash),
@@ -341,7 +349,15 @@ fn mixed_config_tx_is_custom_but_advances_the_config_tip() {
     let genesis = header_id(0);
     let block = header_id(1);
     let mut state = TxState::new(genesis, MsgId::root());
-    state.process_block(block, genesis, genesis, vec![tx_hash], classified, vec![]);
+    state.process_block(
+        block,
+        genesis,
+        genesis,
+        vec![tx_hash],
+        classified,
+        vec![],
+        None,
+    );
     assert_eq!(state.config_tip_at(block), config_id);
 }
 
@@ -373,7 +389,15 @@ fn multi_inscribe_tx_advances_tip_and_delivers_adopted_entries() {
     let mut state = TxState::new(genesis, MsgId::root());
     let old_lineage = state.channel_lineage(genesis);
     mirror_channel_txs(&mut state, &classified, channel_id);
-    state.process_block(block, genesis, genesis, vec![tx_hash], classified, vec![]);
+    state.process_block(
+        block,
+        genesis,
+        genesis,
+        vec![tx_hash],
+        classified,
+        vec![],
+        None,
+    );
 
     assert!(
         state.is_tracked(&tx_hash),
@@ -558,7 +582,15 @@ fn config_in_block_does_not_advance_channel_tip() {
     let extracted = run_with_timeout(std::time::Duration::from_secs(2), move || {
         classify_channel_txs(std::slice::from_ref(&tx), channel_id)
     });
-    state.process_block(block, genesis, genesis, vec![tx_hash], extracted, vec![]);
+    state.process_block(
+        block,
+        genesis,
+        genesis,
+        vec![tx_hash],
+        extracted,
+        vec![],
+        None,
+    );
 
     assert_eq!(
         state.channel_tip_at(block),
