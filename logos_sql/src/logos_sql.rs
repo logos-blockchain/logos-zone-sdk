@@ -37,12 +37,14 @@ pub struct LogosSqlConfig {
     pub writer: Option<WriterConfig>,
 }
 
-/// Credentials for publishing to the channel.
+/// Credentials and publication preferences for publishing to the channel.
 pub struct WriterConfig {
     /// Key used to sign published inscriptions.
     pub signing_key: Ed25519Key,
     /// Fee funding for published transactions.
     pub funding: FundingConfig,
+    /// Publication size and local backpressure settings.
+    pub publication: PublicationConfig,
 }
 
 /// Local publication preferences. Replicas can read batches of any supported
@@ -97,21 +99,12 @@ impl LogosSql {
     /// be opened, or the replication task stops before becoming ready.
     /// Read-only startup also rejects state with pending local publications.
     pub async fn start(config: LogosSqlConfig) -> Result<Self, Error> {
-        Self::start_with_publication(config, PublicationConfig::default()).await
-    }
-
-    /// Like [`Self::start`], with publication size and local backpressure
-    /// settings other than the defaults.
-    ///
-    /// # Errors
-    ///
-    /// Returns the same errors as [`Self::start`].
-    pub async fn start_with_publication(
-        config: LogosSqlConfig,
-        publication: PublicationConfig,
-    ) -> Result<Self, Error> {
         tokio::runtime::Handle::try_current().map_err(|_| Error::RuntimeUnavailable)?;
 
+        let publication = config
+            .writer
+            .as_ref()
+            .map_or_else(PublicationConfig::default, |writer| writer.publication);
         let db = Databases::open(&config.state_dir, publication.max_pending_writes)?;
         let lib_path = db.lib_path().to_owned();
         let live_path = db.live_path().to_owned();
@@ -123,6 +116,7 @@ impl LogosSql {
             // ZoneSDK's observer setup still requires a key and funding config.
             // Use a fresh key and inert funding; the runtime blocks publication.
             WriterConfig {
+                publication,
                 signing_key: Ed25519Key::generate(&mut OsRng),
                 funding: FundingConfig {
                     funding_pk: ZkPublicKey::zero(),

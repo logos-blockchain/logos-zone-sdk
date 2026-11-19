@@ -12,11 +12,23 @@ version     = { workspace = true }
 [lints]
 workspace = true
 
-[dev-dependencies]
-cucumber               = { features = ["macros", "output-junit"], workspace = true }
-lb-testing-framework   = { workspace = true }
-logos-blockchain-tests = { workspace = true }
-tokio                  = { features = ["macros", "rt-multi-thread"], workspace = true }
+[dependencies]
+cucumber                         = { features = ["macros", "output-junit"], workspace = true }
+futures                          = { workspace = true }
+lb-common-http-client            = { workspace = true }
+lb-core                          = { workspace = true }
+lb-groth16                       = { workspace = true }
+lb-http-api-common               = { workspace = true }
+lb-key-management-system-service = { workspace = true }
+lb-testing-framework             = { workspace = true }
+lb-utils                         = { workspace = true }
+lb-zone-sdk                      = { workspace = true }
+logos-blockchain-tests           = { workspace = true }
+rand                             = { workspace = true }
+reqwest                          = { workspace = true }
+thiserror                        = { workspace = true }
+tokio                            = { workspace = true }
+tracing                          = { workspace = true }
 
 [features]
 cucumber = []
