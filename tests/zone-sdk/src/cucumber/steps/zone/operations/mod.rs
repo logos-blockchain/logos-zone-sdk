@@ -147,7 +147,7 @@ impl PublishDeadline {
         }
     }
 
-    fn is_expired(self) -> bool {
+    pub(super) fn is_expired(self) -> bool {
         self.started_at.elapsed() > self.timeout
     }
 }

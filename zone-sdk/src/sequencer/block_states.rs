@@ -18,6 +18,7 @@ use lb_core::{
     },
 };
 use lb_mmr::PushWithPathsError;
+use lb_wallet::SPEND_ROOT_DEPTH;
 use rpds::{HashTrieSetSync, ListSync};
 
 use super::{
@@ -420,6 +421,32 @@ impl BlockStates {
         tip.and_then(|tip| self.block_states.get(&tip))
             .map_or(&self.finalized.notes, |state| &state.notes)
             .view(&self.finalized.notes)
+    }
+
+    /// The program notes a step prepared at `tip` spends, at the root it
+    /// names: the set [`SPEND_ROOT_DEPTH`] blocks below the tip, the depth
+    /// every wallet spend names its root at, or the deepest one held on its
+    /// branch, keeping the notes still in the tip's set. The finalized set
+    /// when no tip is known.
+    pub fn program_spend_set(&self, tip: Option<HeaderId>) -> ProgramNoteSet {
+        let Some((tip, tip_state)) = tip.and_then(|tip| Some((tip, self.block_states.get(&tip)?)))
+        else {
+            return self.finalized.notes.clone();
+        };
+        let mut block = tip;
+        let mut base = tip_state;
+        for _ in 0..SPEND_ROOT_DEPTH {
+            let Some((parent, state)) = self
+                .parent_map
+                .get(&block)
+                .and_then(|parent| Some((*parent, self.block_states.get(parent)?)))
+            else {
+                break;
+            };
+            block = parent;
+            base = state;
+        }
+        base.notes.still_in(&tip_state.notes)
     }
 
     /// The finalized note set, for checkpointing.

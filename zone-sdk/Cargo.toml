@@ -17,6 +17,7 @@ workspace = true
 testing = ["dep:lb-testing-framework", "dep:testing-framework-app", "dep:testing-framework-core"]
 
 [dependencies]
+ark-ff                           = { workspace = true }
 async-trait                      = { workspace = true }
 futures                          = { workspace = true }
 hex                              = { workspace = true }
@@ -28,8 +29,10 @@ lb-http-api-common               = { workspace = true }
 lb-key-management-system-service = { workspace = true }
 lb-log-targets                   = { workspace = true }
 lb-mmr                           = { workspace = true }
+lb-program-spend                 = { workspace = true }
 lb-testing-framework             = { optional = true, workspace = true }
 lb-time                          = { workspace = true }
+lb-wallet                        = { workspace = true }
 reqwest                          = { workspace = true }
 rpds                             = { workspace = true }
 serde                            = { features = ["derive"], workspace = true }

@@ -718,3 +718,42 @@ Feature: Zone SDK
       | alias |
       | MSG_1 |
     Then the channel view contract holds for all zone sequencers
+
+  @zone_ci
+  Scenario: A holder's deposit moves through the program and back to the holder
+    Given the genesis block has the following wallet resources:
+      | account_index | token_count | token_amount |
+      | 1             | 3           | 100000       |
+    And I have a cluster with capacity of 1 nodes
+    And I start nodes with wallet and sequencer resources:
+      | node_name | account_index | wallet_name | connected_to | sequencers |
+      | NODE_1    | 1             | WALLET_1A   |              | SEQ_A      |
+    When node "NODE_1" is at height 1 in 120 seconds
+    And wallet "WALLET_1A" sends 4 notes of 10000 LGO to node "NODE_1" funding wallet as "FUNDING_TOPUP"
+    And transaction "FUNDING_TOPUP" is included on node "NODE_1" in 180 seconds
+    And I start zone sequencer "SEQ_A" with indexer
+    And sequencer "SEQ_A" publishes the following zone messages:
+      | alias | data                |
+      | MSG_1 | initial inscription |
+    Then all zone messages are safe in 120 seconds
+    When sequencer "SEQ_A" registers zone program "PROGRAM_1"
+    Then zone transaction "PROGRAM_1" is included in 120 seconds
+    And sequencer "SEQ_A" observes program registration "PROGRAM_1" in 120 seconds
+    When wallet "WALLET_1A" deposits 1000 LGO into the channel of sequencer "SEQ_A" as "DEPOSIT"
+    Then zone transaction "DEPOSIT" is included in 120 seconds
+    When wallet "WALLET_1A" pays 600 LGO of its channel notes to program "PROGRAM_1" of sequencer "SEQ_A" as step "PAY_IN"
+    And sequencer "SEQ_A" publishes zone block "BLOCK_1" with step "PAY_IN" and a step of program "PROGRAM_1" collecting it
+    Then zone transaction "BLOCK_1" is included in 120 seconds
+    And sequencer "SEQ_A" tracks the program notes zone block "BLOCK_1" created in 120 seconds
+    When sequencer "SEQ_A" publishes zone block "BLOCK_2" with a step of program "PROGRAM_1" paying its notes to wallet "WALLET_1A" as "PAYOUT"
+    Then zone transaction "BLOCK_2" is included in 120 seconds
+    And sequencer "SEQ_A" tracks the program notes zone block "BLOCK_2" created in 120 seconds
+    When wallet "WALLET_1A" withdraws channel note "PAYOUT" from the channel of sequencer "SEQ_A" as "WITHDRAW"
+    Then zone transaction "WITHDRAW" is included in 120 seconds
+    And wallet "WALLET_1A" holds a ledger note of 600 LGO in 180 seconds
+    And the zone indexer returns messages in this order:
+      | alias   |
+      | MSG_1   |
+      | BLOCK_1 |
+      | BLOCK_2 |
+    Then the channel view contract holds for all zone sequencers

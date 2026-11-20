@@ -4,7 +4,17 @@ use std::{
 };
 
 use lb_core::{
-    mantle::ops::channel::{ChannelId, MsgId, inscribe::Inscription},
+    mantle::{
+        Note,
+        notes::NoteCommitment,
+        ops::{
+            StepProof,
+            channel::{
+                ChannelId, MsgId,
+                inscribe::{Inscription, Step},
+            },
+        },
+    },
     proofs::channel_multi_sig_proof::IndexedSignatures,
 };
 use lb_key_management_system_service::keys::{Ed25519Key, Ed25519PublicKey};
@@ -16,6 +26,14 @@ use super::steps::zone::runner::{
     Event, IndexedSignature, InscriptionId, PreparedChannelConfig, ProgramRegisterInfo,
     SequencerCheckpoint, SequencerClient,
 };
+
+/// A program a sequencer registered: the registration and the seed of the
+/// toy circuit whose key it registered, which proves its steps.
+#[derive(Debug, Clone)]
+pub struct ZoneProgram {
+    pub info: ProgramRegisterInfo,
+    pub circuit_seed: u64,
+}
 
 pub struct ZonePublishedMessage {
     pub payload: Inscription,
@@ -87,7 +105,13 @@ pub struct ZoneState {
     latest_checkpoints: HashMap<String, SequencerCheckpoint>,
     prepared_configs: HashMap<String, PreparedChannelConfig>,
     prepared_config_signatures: HashMap<String, IndexedSignatures>,
-    programs: HashMap<String, ProgramRegisterInfo>,
+    programs: HashMap<String, ZoneProgram>,
+    /// The notes the program step of a published zone block created.
+    program_outputs: HashMap<String, Vec<NoteCommitment>>,
+    /// Channel notes a holder knows the opening of: deposits and payouts.
+    channel_notes: HashMap<String, Note>,
+    /// Steps a user's node built and proved, for a zone block to carry.
+    user_steps: HashMap<String, (Step, StepProof)>,
     sequencer_startups: HashMap<String, ZoneSequencerStartup>,
     sorted_total_payloads: Option<usize>,
     sorted_expected_by_sequencer: Option<HashMap<String, Vec<Inscription>>>,
@@ -346,14 +370,53 @@ impl ZoneState {
         self.prepared_configs.insert(alias, prepared);
     }
 
-    pub fn remember_program(&mut self, alias: String, program: ProgramRegisterInfo) {
+    pub fn remember_program(&mut self, alias: String, program: ZoneProgram) {
         self.programs.insert(alias, program);
     }
 
-    pub fn program(&self, alias: &str) -> Result<&ProgramRegisterInfo, StepError> {
+    pub fn program(&self, alias: &str) -> Result<&ZoneProgram, StepError> {
         self.programs.get(alias).ok_or(StepError::LogicalError {
             message: format!("Zone program '{alias}' not found"),
         })
+    }
+
+    pub fn remember_program_outputs(&mut self, block_alias: String, outputs: Vec<NoteCommitment>) {
+        self.program_outputs.insert(block_alias, outputs);
+    }
+
+    pub fn program_outputs(&self, block_alias: &str) -> Result<&[NoteCommitment], StepError> {
+        self.program_outputs
+            .get(block_alias)
+            .map(Vec::as_slice)
+            .ok_or(StepError::LogicalError {
+                message: format!("Zone block '{block_alias}' published no program step"),
+            })
+    }
+
+    pub fn remember_channel_note(&mut self, alias: String, note: Note) {
+        self.channel_notes.insert(alias, note);
+    }
+
+    pub fn channel_note(&self, alias: &str) -> Result<Note, StepError> {
+        self.channel_notes
+            .get(alias)
+            .copied()
+            .ok_or(StepError::LogicalError {
+                message: format!("Channel note '{alias}' not found"),
+            })
+    }
+
+    pub fn remember_user_step(&mut self, alias: String, step: Step, proof: StepProof) {
+        self.user_steps.insert(alias, (step, proof));
+    }
+
+    pub fn user_step(&self, alias: &str) -> Result<(Step, StepProof), StepError> {
+        self.user_steps
+            .get(alias)
+            .cloned()
+            .ok_or(StepError::LogicalError {
+                message: format!("User step '{alias}' not found"),
+            })
     }
 
     pub fn prepared_config(&self, alias: &str) -> Result<&PreparedChannelConfig, StepError> {
@@ -656,6 +719,9 @@ impl ZoneState {
         self.latest_checkpoints.clear();
         self.prepared_configs.clear();
         self.programs.clear();
+        self.program_outputs.clear();
+        self.channel_notes.clear();
+        self.user_steps.clear();
         self.prepared_config_signatures.clear();
         self.expected_custom_payloads.clear();
         self.view_violations.clear();

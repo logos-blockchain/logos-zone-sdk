@@ -69,6 +69,7 @@ mod block_states;
 mod client;
 mod handle;
 pub(crate) mod program_notes;
+mod program_steps;
 mod slot_clock;
 mod state;
 mod tx_builder;
@@ -94,6 +95,10 @@ pub use lb_core::{
     proofs::channel_multi_sig_proof::{IndexedSignature, IndexedSignatures},
 };
 pub use lb_key_management_system_service::keys::{Ed25519Key, UnverifiedEd25519PublicKey};
+pub use program_steps::{
+    MiniBlockRequest, PreparedProgramInscription, PreparedProgramStep, PreparedStep, ProgramOutput,
+    ProgramStepRequest, StepRequest, UserOutput, prove_program_step,
+};
 // Pure key-only signing primitive for prepared multi-sig artifacts — usable by
 // an offline key holder with no sequencer or chain state.
 pub use tx_builder::sign_prepared;

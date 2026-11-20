@@ -17,7 +17,7 @@ cucumber                         = { features = ["macros", "output-junit"], work
 futures                          = { workspace = true }
 lb-common-http-client            = { workspace = true }
 lb-core                          = { features = ["test-utils"], workspace = true }
-lb-groth16                       = { workspace = true }
+lb-groth16                       = { features = ["test-utils"], workspace = true }
 lb-http-api-common               = { workspace = true }
 lb-key-management-system-service = { workspace = true }
 lb-testing-framework             = { workspace = true }

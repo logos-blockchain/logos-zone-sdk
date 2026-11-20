@@ -42,7 +42,7 @@ fn inscription_steps(tx: &SignedOps<Unverified, StandardMode>) -> InscriptionSte
 use super::{
     block_fetch::{channel_configs, channel_inscriptions, is_pure_config},
     block_states::{BlockChannelTx, BlockStates, ChannelTxKind, SharedTx},
-    program_notes::{BlockNoteSet, program_step_inputs},
+    program_notes::{BlockNoteSet, ProgramNoteSet, program_step_inputs},
     types::{
         ChannelUpdateTx, Error, InscriptionInfo, ObservedOp, PendingFunding, PendingTx,
         ProgramNotesCheckpoint, ProgramNotesView,
@@ -1513,10 +1513,30 @@ impl TxState {
     #[must_use]
     pub fn program_notes(&self, tip: Option<HeaderId>) -> ProgramNotesView {
         let mut view = self.blocks.program_notes_at(tip);
+        let spent = self.pending_program_inputs(tip);
+        view.finalized
+            .retain(|note| !spent.contains(&note.nullifier));
+        view.unfinalized
+            .retain(|note| !spent.contains(&note.nullifier));
+        view
+    }
+
+    /// The program notes a step prepared at `tip` may consume, at the root
+    /// it names (see [`BlockStates::program_spend_set`]), minus what the
+    /// pending txs unmined there already spend.
+    #[must_use]
+    pub fn program_spend_set(&self, tip: Option<HeaderId>) -> ProgramNoteSet {
+        self.blocks
+            .program_spend_set(tip)
+            .without(&self.pending_program_inputs(tip))
+    }
+
+    /// The program notes the pending txs unmined at `tip`, own inscriptions
+    /// and custom txs alike, spend.
+    fn pending_program_inputs(&self, tip: Option<HeaderId>) -> HashSet<NoteNullifier> {
         let safe = tip.map(|tip| self.blocks.safe_at(tip)).unwrap_or_default();
         let unmined = |hash: &TxHash| !safe.contains(hash);
-        let spent: HashSet<NoteNullifier> = self
-            .pending
+        self.pending
             .iter()
             .filter(|(hash, _)| unmined(hash))
             .map(|(_, pending)| &pending.signed_tx)
@@ -1527,12 +1547,7 @@ impl TxState {
                     .map(|(_, other)| &other.signed_tx),
             )
             .flat_map(|tx| program_step_inputs(tx).collect::<Vec<_>>())
-            .collect();
-        view.finalized
-            .retain(|note| !spent.contains(&note.nullifier));
-        view.unfinalized
-            .retain(|note| !spent.contains(&note.nullifier));
-        view
+            .collect()
     }
 
     /// See [`BlockStates::finalized_program_notes`].

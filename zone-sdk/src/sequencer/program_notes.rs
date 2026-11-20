@@ -197,6 +197,58 @@ impl ProgramNoteSet {
         self.notes.values()
     }
 
+    pub fn note(&self, commitment: &NoteCommitment) -> Option<&ProgramNote> {
+        self.notes.get(commitment)
+    }
+
+    /// The set at `self`'s root keeping only the notes also in `tip`: what a
+    /// step naming `self`'s root may consume once `tip` is the chain.
+    #[must_use]
+    pub fn still_in(&self, tip: &Self) -> Self {
+        Self {
+            commitments: self.commitments.clone(),
+            notes: self
+                .notes
+                .iter()
+                .filter(|(commitment, _)| tip.contains(commitment))
+                .map(|(commitment, note)| (*commitment, note.clone()))
+                .collect(),
+        }
+    }
+
+    /// The set without the notes of `spent`.
+    #[must_use]
+    pub fn without(&self, spent: &HashSet<NoteNullifier>) -> Self {
+        if spent.is_empty() {
+            return self.clone();
+        }
+        Self {
+            commitments: self.commitments.clone(),
+            notes: self
+                .notes
+                .iter()
+                .filter(|(_, note)| !spent.contains(&note.nullifier))
+                .map(|(commitment, note)| (*commitment, note.clone()))
+                .collect(),
+        }
+    }
+
+    /// The root of the set extended with `appended`, and the paths of
+    /// `inputs` against it: what a step at that position of a transaction
+    /// is proven against.
+    pub fn extended(
+        &self,
+        appended: &[NoteCommitment],
+        inputs: &[&ProgramNote],
+    ) -> Result<(Fr, Vec<MerklePath>), PushWithPathsError> {
+        let mut paths: Vec<MerklePath> = inputs.iter().map(|note| note.path.clone()).collect();
+        let mut commitments = self.commitments.clone();
+        for commitment in appended {
+            commitments = commitments.push_with_paths(*commitment, &mut paths)?.0;
+        }
+        Ok((commitments.frontier_root(), paths))
+    }
+
     /// The set at `self`'s root, split into the notes also in `finalized`
     /// and the rest.
     #[must_use]
@@ -462,5 +514,65 @@ mod tests {
         assert!(
             BlockNoteSet::from_events(&events, ChannelId::from([3; 32]), HashMap::new()).is_none()
         );
+    }
+
+    #[test]
+    fn still_in_keeps_the_root_and_drops_what_the_tip_consumed() {
+        let base = ProgramNoteSet::default()
+            .apply(&block(&[1], &[1, 2], &[]))
+            .unwrap();
+        let tip = base.apply(&block(&[2], &[3], &[1])).unwrap();
+        let spend = base.still_in(&tip);
+        assert_eq!(spend.root(), base.root());
+        assert_eq!(
+            spend
+                .notes()
+                .map(|note| note.commitment)
+                .collect::<Vec<_>>(),
+            [commitment(2)],
+            "note 1 is consumed at the tip and note 3 is not in the base yet"
+        );
+        assert!(
+            spend
+                .note(&commitment(2))
+                .unwrap()
+                .path
+                .verify::<ZkHasher>(commitment(2).0, spend.root())
+        );
+    }
+
+    #[test]
+    fn without_drops_the_spent_notes() {
+        let set = ProgramNoteSet::default()
+            .apply(&block(&[], &[1, 2], &[]))
+            .unwrap();
+        let rest = set.without(&HashSet::from([nullifier(1)]));
+        assert_eq!(
+            rest.notes().map(|note| note.commitment).collect::<Vec<_>>(),
+            [commitment(2)]
+        );
+        assert_eq!(rest.root(), set.root());
+    }
+
+    #[test]
+    fn extended_proves_the_inputs_against_the_root_the_buffer_makes() {
+        let set = ProgramNoteSet::default()
+            .apply(&block(&[1], &[1, 2], &[]))
+            .unwrap();
+        let appended = [fixtures::foreign(2), commitment(3)];
+        let inputs = [set.note(&commitment(2)).unwrap()];
+        let (root, paths) = set.extended(&appended, &inputs).unwrap();
+        let expected = appended
+            .iter()
+            .fold(set.commitments.clone(), |mmr, commitment| {
+                mmr.push_with_paths(*commitment, &mut []).unwrap().0
+            })
+            .frontier_root();
+        assert_eq!(root, expected);
+        assert_ne!(root, set.root());
+        assert!(paths[0].verify::<ZkHasher>(commitment(2).0, root));
+        let (unextended, paths) = set.extended(&[], &inputs).unwrap();
+        assert_eq!(unextended, set.root());
+        assert_eq!(paths, [inputs[0].path.clone()]);
     }
 }
