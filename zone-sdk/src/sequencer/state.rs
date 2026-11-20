@@ -811,6 +811,13 @@ impl TxState {
         self.pending_other.get(&tx_hash)?.last_config
     }
 
+    /// Whether a pending tx leaves `config` as its config tip.
+    pub fn pends_config(&self, config: MsgId) -> bool {
+        self.pending_other
+            .values()
+            .any(|entry| entry.last_config == Some(config))
+    }
+
     /// Remove `entries` and everything pending chained on them, on either
     /// lineage, queuing them for the shed pass that reports them: an entry
     /// goes after every parent that goes with it, ties by hash.

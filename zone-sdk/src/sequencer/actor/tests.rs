@@ -1,4 +1,4 @@
-use std::{num::NonZero, sync::Arc};
+use std::{collections::HashSet, num::NonZero, sync::Arc};
 
 use lb_core::{
     header::HeaderId,
@@ -216,6 +216,57 @@ async fn submit_signed_tx_refuses_a_parent_with_a_mined_child() {
     assert_eq!(result.tx.inscription().parent_msg, mined.id());
     assert_eq!(result.tx.inscription().this_msg, on_tip.id());
     assert_eq!(sequencer.state.as_ref().unwrap().pending_publish_count(), 1);
+}
+
+/// A hand-built config chains on the mined config tip or on a config of
+/// ours still pending; any other parent can never land and is refused at
+/// submit.
+#[tokio::test]
+async fn submit_signed_tx_refuses_an_unknown_config_parent() {
+    let channel_id = ChannelId::from([0; 32]);
+    let key = Ed25519Key::from_bytes(&[0; 32]);
+    let mut sequencer = ready_sequencer_with_channel(None, key.clone()).await;
+    let config_on = |parent: MsgId| {
+        ChannelConfigOp::new(
+            channel_id,
+            parent,
+            VerifiedChannelKeys::try_from(vec![key.public_key()]).unwrap(),
+            SlotTimeframe::from(0u32),
+            SlotTimeout::from(0u32),
+            NonZero::<u16>::MIN,
+            NonZero::<u16>::MIN,
+        )
+        .unwrap()
+    };
+    let tip = sequencer.compute_publish_parent();
+
+    let unknown_tx =
+        unverified_tx_with_ops(vec![Op::ChannelConfig(config_on(MsgId::from([9; 32])))]);
+    let result = sequencer.handle().submit_signed_tx(unknown_tx, tip);
+    assert!(
+        matches!(result, Err(Error::ChannelStateChanged(_))),
+        "a config parent the channel never produced must be refused, got {result:?}"
+    );
+    assert!(
+        sequencer
+            .checkpoint()
+            .is_none_or(|checkpoint| checkpoint.pending_txs.is_empty()),
+        "refused config must not be tracked"
+    );
+
+    let on_tip = config_on(MsgId::root());
+    let on_tip_id = on_tip.id();
+    let on_tip_tx = unverified_tx_with_ops(vec![Op::ChannelConfig(on_tip)]);
+    sequencer
+        .handle()
+        .submit_signed_tx(on_tip_tx, tip)
+        .expect("a config on the config tip is accepted");
+
+    let chained_tx = unverified_tx_with_ops(vec![Op::ChannelConfig(config_on(on_tip_id))]);
+    sequencer
+        .handle()
+        .submit_signed_tx(chained_tx, tip)
+        .expect("a config on a pending config of ours is accepted");
 }
 
 /// A gap block's deposit surfaces once, in order, even when the first
@@ -1920,6 +1971,63 @@ async fn stream_gap_surfaces_backfilled_inscriptions_as_adopted() {
             .any(|t| t.inscription().is_some_and(|i| i.this_msg == y_id)),
         "inscription mined during the stream gap must surface as adopted on the next \
              BlocksProcessed after reconnect; got {update:?}",
+    );
+}
+
+/// A competing mined transaction displaces the entire custom pending chain.
+/// Every orphan must retain all its inscriptions so a caller can republish
+/// them.
+#[tokio::test]
+async fn custom_orphans_keep_all_inscriptions_in_chain_order() {
+    let channel_id = ChannelId::from([0; 32]);
+    let key = Ed25519Key::from_bytes(&[0; 32]);
+    let mut sequencer = ready_sequencer_with_channel(None, key).await;
+
+    let mut parent = MsgId::root();
+    let mut submitted = Vec::new();
+    for payloads in [[b"a", b"b"], [b"c", b"d"]] {
+        let first = inscribe_op(channel_id, parent, payloads[0]);
+        let second = inscribe_op(channel_id, first.id(), payloads[1]);
+        parent = second.id();
+        let tx = unverified_tx_with_ops(vec![
+            Op::ChannelInscribe(first),
+            Op::ChannelInscribe(second),
+        ]);
+        sequencer
+            .handle()
+            .submit_signed_tx(tx.clone(), parent)
+            .unwrap();
+        submitted.push(tx);
+    }
+
+    let competing = inscribe_op(channel_id, MsgId::root(), b"winner");
+    let block = api_block(
+        2,
+        1,
+        2,
+        vec![unverified_tx_with_ops(vec![Op::ChannelInscribe(competing)])],
+    );
+    let result = sequencer
+        .process_block_event(&live_event(&block))
+        .await
+        .unwrap();
+    let (update, ..) = sequencer.apply_block_result(result);
+
+    assert_eq!(update.orphaned().len(), submitted.len());
+    for (orphan, original) in update.orphaned().iter().zip(&submitted) {
+        let ChannelUpdateTx::Custom(tx) = orphan else {
+            panic!("all inscriptions must be reported together, got {orphan:?}");
+        };
+        assert_eq!(tx, original, "orphans retain their bytes and chain order");
+    }
+    assert!(
+        sequencer
+            .state
+            .as_ref()
+            .unwrap()
+            .all_pending_txs()
+            .iter()
+            .all(|(hash, _)| submitted.iter().all(|tx| tx.hash() != *hash))
     );
 }
 

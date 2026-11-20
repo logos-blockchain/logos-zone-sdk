@@ -3,13 +3,10 @@ on:
   merge_group:
     types: [ checks_requested ]
   push:
-    branches: [ main ]
+    branches: [ master ]
 
 name: Code checks
 
-# Mirrors `code-check.yml` in the node repository: the cheap checks run on GitHub-hosted runners for every
-# event, the test suite runs on the self-hosted runners for pull requests, and a stable result job gates the
-# merge queue.
 concurrency:
   group: ${{ github.workflow }}@${{ github.ref }}
   cancel-in-progress: true
@@ -106,24 +103,21 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@85e6279cec87321a52edac9c87bce653a07cf6c2  # Version 4.2.2
 
-      - name: Set up Cargo cache
-        uses: ./.github/actions/setup-cargo-cache
+      - name: Cache Cargo dependencies
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # Version 4.2.3
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          key-prefix: code-check/lints/${{ matrix.os }}
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/debug/
+          key: code-check/lints/v1/${{ runner.os }}/${{ runner.arch }}/${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
 
       - name: Run cargo clippy on workspace
         uses: actions-rs/cargo@9e120dd99b0fbad1c065f686657e914e76bd7b72  # Version 1.0.1
         with:
           command: clippy
           args: --locked --workspace --all-targets --all-features
-
-      - name: Update Cargo cache
-        if: success() || failure()
-        uses: ./.github/actions/update-cargo-cache
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          key-prefix: code-check/lints/${{ matrix.os }}
 
   tests:
     name: Run test suite
@@ -137,23 +131,45 @@ jobs:
       fail-fast: false # all OSes should be tested even if one fails (default: true)
       matrix:
         os:
-          # Using self-hosted runners because the test support crates link the whole node, which runs out of
-          # memory on GitHub-hosted runners
-          - [ self-hosted, Linux ]
-          - [ self-hosted, macOS ]
+          # Using self-hosted runners because we were running out of memory on GitHub-hosted runners
+          - bladerunner-linux
+          - bladerunner-macos
     runs-on: ${{ matrix.os }}
+    # Build settings match the node repository so `sccache` entries are shared.
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
+      # allows `sccache` to cache the workspace crates.
+      CARGO_INCREMENTAL: 0
+      # line tables are enough for backtraces.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
-      - name: Disable rustup override
-        run: rustup override unset || true
-
       - name: Checkout repository
         uses: actions/checkout@85e6279cec87321a52edac9c87bce653a07cf6c2  # Version 4.2.2
 
-      # Prune before any builds.
-      - name: Prune disk space (cache-aware, self-hosted)
-        uses: ./.github/actions/prune-disk-space
+      # Cargo recreates this checkout from its Git database after removal.
+      - name: Repair empty circuits manifest
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          checkout="/cache/cargo/git/checkouts/logos-blockchain-circuits-6ffb2cf5a63ddcbb/ebf7ddf"
+          manifest="$checkout/rust/logos-blockchain-circuits-types/Cargo.toml"
+          if [ -f "$manifest" ] && [ ! -s "$manifest" ]; then
+            echo "Removing circuits checkout with an empty manifest: $checkout"
+            rm -rf -- "$checkout"
+          fi
+
+      - name: Check for a preinstalled cargo-nextest
+        id: nextest
+        shell: bash
+        run: |
+          if cargo nextest --version; then
+            echo "installed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "installed=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Install cargo-nextest
+        if: ${{ steps.nextest.outputs.installed != 'true' }}
         uses: taiki-e/install-action@13608cbb45b01feb47ef444ab1a42dc41ad56f1a # Version 2.79.11
         with:
           tool: cargo-nextest
@@ -163,13 +179,13 @@ jobs:
         uses: actions-rs/cargo@9e120dd99b0fbad1c065f686657e914e76bd7b72  # Version 1.0.1
         with:
           command: nextest
-          # The Cucumber runners need node binaries and run in their dedicated workflow.
+          # The Cucumber runners need node binaries and are run locally for now.
           args: >-
             run --workspace --locked --lib --bins --examples --tests --retries 2
             --all-features --no-fail-fast
             --exclude logos-blockchain-zone-tests --exclude logos-blockchain-sql-tests
 
-      # Run client unit tests here; their Cucumber runners belong to integration CI.
+      # Include the support libraries without invoking their Cucumber runners.
       - name: Run client test support unit tests
         uses: actions-rs/cargo@9e120dd99b0fbad1c065f686657e914e76bd7b72  # Version 1.0.1
         with:
@@ -178,15 +194,9 @@ jobs:
             run --locked --lib --retries 2 --no-fail-fast
             -p logos-blockchain-zone-tests -p logos-blockchain-sql-tests
 
-      - name: Clean up build artifacts
-        if: success() || failure()
-        uses: actions-rs/cargo@9e120dd99b0fbad1c065f686657e914e76bd7b72  # Version 1.0.1
-        with:
-          command: clean
-
   # Stable required check for nextest unit tests.
   #
-  # On pull requests, this job succeeds only when both self-hosted nextest unit
+  # On pull requests, this job succeeds only when both nextest unit
   # test matrix jobs succeeded.
   #
   # On merge_group, the real nextest unit tests matrix is skipped and this lightweight
