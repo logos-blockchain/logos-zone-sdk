@@ -22,6 +22,16 @@
 //! [`adapter::Node`] trait; an HTTP implementation is provided as
 //! [`adapter::NodeHttpClient`].
 //!
+//! An inscription carrying program steps is built with
+//! [`sequencer::SequencerHandle::prepare_program_inscription`]: the sequencer
+//! tracks the channel's program notes
+//! ([`sequencer::SequencerHandle::program_notes`]) and builds each program
+//! step on them, with the witness of its spend. The spend is proven with
+//! [`sequencer::prove_program_step`], off the drive loop; the zone adds its
+//! program proof and publishes the inscription with
+//! [`sequencer::SequencerHandle::submit_prepared_inscription`] and
+//! [`sequencer::PreparedProgramInscription::step_proofs`].
+//!
 //! # Quick start (sequencer)
 //!
 //! The sequencer is owned by a single drive task. Two command surfaces:
@@ -82,6 +92,7 @@ mod test_support;
 pub use lb_binary_codec as binary_codec;
 pub use lb_common_http_client as common_http_client;
 pub use lb_core as core;
+pub use lb_groth16 as groth16;
 pub use lb_http_api_common as http_api_common;
 pub use lb_key_management_system_service as key_management_system_service;
 #[cfg(feature = "testing")]
@@ -106,30 +117,61 @@ pub mod node_types {
     };
     pub use lb_core::{
         crypto::Hash,
-        events::DepositRecreatedNotes,
         header::HeaderId,
         mantle::{
-            SignedOps, TxHash, Value,
+            Note, SignedOps, TxHash, Value,
             channel::ChannelState,
-            ledger::Inputs,
-            ops::channel::{ChannelId, MsgId, deposit::Metadata, inscribe::Inscription},
+            note_set::CommitmentMmr,
+            notes::{
+                InputNullifiers, NoteCommitment, NoteNullifier, OutputCommitments, ProgramId,
+                derive_program_output_nonce,
+            },
+            ops::{
+                OpId, ProgramNoteOpening, StepProof,
+                channel::{
+                    ChannelId, MsgId,
+                    deposit::Metadata,
+                    inscribe::{
+                        Inscription, InscriptionOp, MiniBlock, MiniBlocks, Step, UserStep,
+                        user_step_id,
+                    },
+                    program_step::{
+                        ProgramDeposit, ProgramStep, program_deposit_id, program_deposits_hash,
+                    },
+                },
+                proof_program_step::{ProgramProof, ProgramStepProof, ZkProgramSpendProof},
+            },
+            programs::{ProgramVerificationKey, derive_program_id, program_step_id},
             transactions::states::Unverified,
         },
     };
+    pub use lb_groth16::Fr;
     pub use lb_http_api_common::bodies::{
         mantle::LimitsResponseBody,
         wallet::fund::{WalletFundRequestBody, WalletFundResponseBody},
     };
+    pub use lb_key_management_system_service::keys::ZkPublicKey;
+    pub use lb_mmr::MerklePath;
 }
+
+use std::sync::Arc;
 
 pub use lb_common_http_client::{CommonHttpClient, Slot};
 use lb_core::{
     crypto::Hash,
-    events::DepositRecreatedNotes,
     mantle::{
-        TxHash, Value,
-        ledger::Inputs,
-        ops::channel::{MsgId, deposit::Metadata, inscribe::Inscription},
+        SignedOps, TxHash,
+        ledger::verification_mode::VerificationMode,
+        notes::{InputNullifiers, OutputCommitments},
+        ops::{
+            OpProofRef, OpRef, StepProof,
+            channel::{
+                MsgId,
+                deposit::Metadata,
+                inscribe::{Inscription, InscriptionOp, MiniBlocks},
+            },
+        },
+        transactions::states::VerificationState,
     },
 };
 pub use lb_key_management_system_service::keys::UnverifiedEd25519PublicKey;
@@ -154,6 +196,44 @@ pub struct ZoneBlock {
     pub data: Inscription,
     /// The public key of the signer of this zone block.
     pub signer: UnverifiedEd25519PublicKey,
+    /// The steps of this zone block.
+    pub steps: InscriptionSteps,
+}
+
+/// The steps of an inscription with their proofs, one per step.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InscriptionSteps {
+    pub mini_blocks: MiniBlocks,
+    pub proofs: Arc<[StepProof]>,
+}
+
+impl InscriptionSteps {
+    pub(crate) fn of(op: &InscriptionOp, proof: OpProofRef) -> Self {
+        let OpProofRef::ChannelInscribe(proof) = proof else {
+            unreachable!("a signed inscription carries an inscription proof")
+        };
+        Self {
+            mini_blocks: op.mini_blocks.clone(),
+            proofs: proof.step_proofs.as_slice().into(),
+        }
+    }
+}
+
+/// The ops of `tx` with their proofs, in op order.
+pub(crate) fn ops_with_proofs<State: VerificationState, Mode: VerificationMode>(
+    tx: &SignedOps<State, Mode>,
+) -> impl Iterator<Item = (OpRef<'_>, OpProofRef<'_>)> {
+    tx.op_refs_iter().zip(tx.op_proof_refs_iter())
+}
+
+/// The inscriptions of `tx` with their steps, in op order.
+pub(crate) fn inscribes<State: VerificationState, Mode: VerificationMode>(
+    tx: &SignedOps<State, Mode>,
+) -> impl Iterator<Item = (&InscriptionOp, InscriptionSteps)> {
+    ops_with_proofs(tx).filter_map(|(op, proof)| match op {
+        OpRef::ChannelInscribe(inscribe) => Some((inscribe, InscriptionSteps::of(inscribe, proof))),
+        _ => None,
+    })
 }
 
 /// A deposit from a zone channel, included/finalized in Bedrock
@@ -164,14 +244,9 @@ pub struct Deposit {
     /// The `op_id` of the deposit op: its stable identity within the tx,
     /// matching `DepositInfo::op_id` on the sequencer side.
     pub op_id: Hash,
-    /// Notes consumed by the deposit (spent-once at the UTXO layer).
-    pub inputs: Inputs,
-    /// The channel notes the deposit re-created its inputs as, sourced from
-    /// the block's events. These carry new `NoteId`s and are what the channel
-    /// now owns.
-    pub notes: DepositRecreatedNotes,
-    /// Total value deposited, sourced from the block's events.
-    pub amount: Value,
+    /// The channel notes the deposit created, as commitments, sourced from
+    /// the block's events. Their values and holders are private.
+    pub outputs: OutputCommitments,
     /// Opaque metadata associated with this deposit
     pub metadata: Metadata,
 }
@@ -183,8 +258,11 @@ pub struct Withdraw {
     pub tx_hash: TxHash,
     /// The `op_id` of the withdraw op: its stable identity within the tx.
     pub op_id: Hash,
-    /// The channel notes released by the withdrawal
-    pub inputs: Inputs,
+    /// The nullifiers of the channel notes the holder withdraws.
+    pub inputs: InputNullifiers,
+    /// The commitments of the ledger notes it creates, released at its due
+    /// slot.
+    pub outputs: OutputCommitments,
 }
 
 impl Deposit {

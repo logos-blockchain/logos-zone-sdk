@@ -5,7 +5,7 @@ use super::{
     publish_message_with_retry, remember_published_zone_message, zone_step_error,
 };
 
-pub(in super::super) fn initialize_zone_indexer(
+pub fn initialize_zone_indexer(
     world: &mut ZoneWorld,
     step: &Step,
     sequencer_alias: impl AsRef<str>,
@@ -22,7 +22,7 @@ pub(in super::super) fn initialize_zone_indexer(
     Ok(())
 }
 
-pub(in super::super) async fn publish_zone_messages(
+pub async fn publish_zone_messages(
     world: &mut ZoneWorld,
     step: &Step,
     sequencer_alias: impl AsRef<str>,
@@ -77,7 +77,7 @@ pub(in super::super) async fn publish_zone_messages(
     Ok(())
 }
 
-pub(in super::super) async fn publish_zone_messages_concurrently(
+pub async fn publish_zone_messages_concurrently(
     world: &mut ZoneWorld,
     step: &Step,
     rows: Vec<ConcurrentZoneMessageRow>,

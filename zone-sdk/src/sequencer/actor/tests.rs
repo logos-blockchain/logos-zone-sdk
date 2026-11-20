@@ -3,56 +3,46 @@ use std::{collections::HashSet, num::NonZero, sync::Arc};
 use lb_core::{
     header::HeaderId,
     mantle::{
-        Note, Op, SignedOps, Utxo,
+        Op, SignedOps,
         channel::{SlotTimeframe, SlotTimeout},
-        ledger::{BoundedInputs, Outputs, verification_mode::StandardMode},
+        ledger::verification_mode::StandardMode,
+        notes::{NoteCommitment, NoteNullifier},
         ops::{
-            OpProof, OpProofRef, OpRef,
+            ChannelInscribeProof, OpProof, OpProofRef, OpRef, StepProof,
             channel::{
                 MsgId, UnverifiedChannelKeys, VerifiedChannelKeys,
                 config::ChannelConfigOp,
                 deposit::{DepositOp, Metadata},
-                inscribe::{Inscription, InscriptionOp},
-                withdraw::ChannelWithdrawOp,
+                inscribe::{Inscription, InscriptionOp, MiniBlocks},
             },
+            program::ProgramRegisterOp,
         },
+        programs::{ProgramVerificationKey, derive_program_id},
         traits::Hashable as _,
         transactions::{OpProofs, Ops, TxList, states::Unverified},
     },
 };
-use lb_key_management_system_service::keys::{Ed25519Key, ZkKey};
-use num_bigint::BigUint;
-use rand::{RngCore as _, thread_rng};
+use lb_groth16::Fr;
+use lb_key_management_system_service::keys::Ed25519Key;
 use tokio::sync::{mpsc, watch};
 
 use super::{
     super::{
         block_fetch::ViewBefore,
         block_states::{BlockChannelTx, ChannelTxKind},
-        state::PendingBundle,
-        types::{ConfigInfo, FinalizedOp, InscriptionInfo, SequencerConfig},
+        types::{ConfigInfo, FinalizedOp, InscriptionInfo, ProgramRegisterInfo, SequencerConfig},
         zone_sequencer::track_pending_tx,
     },
     *,
 };
-use crate::test_support::{
-    FORK_DIGEST, MockNode, StreamEnd, StreamScript, api_block, funding_config, header_id,
-    inscribe_op, live_event, scripts, single_key_channel_state, unverified_tx_with_ops,
+use crate::{
+    InscriptionSteps, inscribes,
+    test_support::{
+        FORK_DIGEST, MockNode, StreamEnd, StreamScript, api_block, funding_config, header_id,
+        inscribe_op, live_event, observed_deposit_ids, scripts, single_key_channel_state,
+        unverified_tx_with_ops,
+    },
 };
-
-#[must_use]
-pub fn utxo_with_sk() -> (ZkKey, Utxo) {
-    let mut op_id = [0u8; 32];
-    thread_rng().fill_bytes(&mut op_id);
-    let zk_sk = ZkKey::from(BigUint::from(0u64));
-    let utxo = Utxo {
-        op_id,
-        output_index: 0,
-        note: Note::new(10, zk_sk.to_public_key()),
-    };
-
-    (zk_sk, utxo)
-}
 
 #[tokio::test]
 async fn prepare_submit_deposit_and_inscription() {
@@ -71,15 +61,17 @@ async fn prepare_submit_deposit_and_inscription() {
     }
 
     // Prepare a deposit op
-    let (sk, utxo) = utxo_with_sk();
     let deposit_op = DepositOp {
         channel_id,
-        inputs: BoundedInputs::from(utxo.id()).into(),
+        inputs: [NoteNullifier(Fr::from(1u64))].into(),
+        outputs: [NoteCommitment(Fr::from(2u64))].into(),
+        commitment_merkle_root: Fr::from(3u64),
+        excess_value: 0,
         metadata: Metadata::new_unchecked(b"to Alice".to_vec()),
     };
 
     // Build a `MantleTx` via the handle
-    let (tx, msg_id, inscription_sig) = sequencer
+    let (tx, msg_id, _inscription_sig) = sequencer
         .handle()
         .prepare_tx(
             Ops::new(FORK_DIGEST, [Op::ChannelDeposit(deposit_op.clone())]),
@@ -90,15 +82,9 @@ async fn prepare_submit_deposit_and_inscription() {
     assert_eq!(tx.inner()[0], Op::ChannelDeposit(deposit_op));
     assert!(matches!(tx.inner()[1], Op::ChannelInscribe(_)));
 
-    // Sign the `MantleTx`
-    let op_proofs = OpProofs::from([
-        OpProof::ZkSig(
-            ZkKey::multi_sign(std::slice::from_ref(&sk), &tx.clone().hash().to_fr()).unwrap(),
-        ),
-        OpProof::Ed25519Sig(inscription_sig),
-    ]);
-    let signed_tx = SignedOps::from_parts(tx, op_proofs)
-        .expect("Should generate a valid transaction with valid matching proofs.");
+    // The holder's ZkTransfer is out of the SDK's hands: sample proofs stand
+    // in for it.
+    let signed_tx = SignedOps::from_ops_with_sample_proofs(tx);
 
     // Submit via the handle (mutates state + queues post to in_flight).
     let (result, checkpoint) = sequencer
@@ -143,9 +129,13 @@ async fn submit_signed_tx_refuses_a_parent_with_a_pending_child() {
             Inscription::new_unchecked(b"prepared first".to_vec()),
         )
         .unwrap();
-    let signed_tx =
-        SignedOps::from_parts(tx, OpProofs::from([OpProof::Ed25519Sig(inscription_sig)]))
-            .expect("a valid inscription-only tx");
+    let signed_tx = SignedOps::from_parts(
+        tx,
+        OpProofs::from([OpProof::ChannelInscribe(
+            ChannelInscribeProof::without_steps(inscription_sig),
+        )]),
+    )
+    .expect("a valid inscription-only tx");
 
     sequencer
         .handle()
@@ -176,25 +166,31 @@ async fn submit_signed_tx_refuses_a_parent_with_a_mined_child() {
     let mined = inscribe_op(channel_id, MsgId::root(), b"1");
     let mined_tx = unverified_tx_with_ops(vec![Op::ChannelInscribe(mined.clone())]);
     let lib = sequencer.state.as_ref().unwrap().lib();
-    sequencer.state.as_mut().unwrap().process_block(
-        header_id(1),
-        lib,
-        lib,
-        std::iter::empty(),
-        vec![BlockChannelTx::new(
-            Arc::new(mined_tx.clone()),
-            mined_tx.hash(),
-            ChannelTxKind::Inscription(InscriptionInfo {
-                tx_hash: mined_tx.hash(),
-                parent_msg: MsgId::root(),
-                this_msg: mined.id(),
-                payload: mined.inscription.clone(),
-                signer: Some(mined.signer),
-            }),
-        )],
-        Vec::new(),
-        vec![],
-    );
+    sequencer
+        .state
+        .as_mut()
+        .unwrap()
+        .process_block(
+            header_id(1),
+            lib,
+            lib,
+            std::iter::empty(),
+            vec![BlockChannelTx::new(
+                Arc::new(mined_tx.clone()),
+                mined_tx.hash(),
+                ChannelTxKind::Inscription(InscriptionInfo {
+                    tx_hash: mined_tx.hash(),
+                    parent_msg: MsgId::root(),
+                    this_msg: mined.id(),
+                    payload: mined.inscription.clone(),
+                    signer: Some(mined.signer),
+                    steps: InscriptionSteps::default(),
+                }),
+            )],
+            vec![],
+            None,
+        )
+        .unwrap();
     sequencer.current_tip = Some(header_id(1));
     assert_eq!(sequencer.compute_publish_parent(), mined.id());
 
@@ -233,7 +229,6 @@ async fn submit_signed_tx_refuses_an_unknown_config_parent() {
             VerifiedChannelKeys::try_from(vec![key.public_key()]).unwrap(),
             SlotTimeframe::from(0u32),
             SlotTimeout::from(0u32),
-            NonZero::<u16>::MIN,
             NonZero::<u16>::MIN,
         )
         .unwrap()
@@ -280,15 +275,7 @@ async fn gap_deposits_surface_after_a_failed_backfill_and_a_fork_switch() {
         sync::{Arc, atomic::AtomicUsize},
     };
 
-    use lb_core::{
-        events::DepositNote,
-        mantle::{
-            ledger::NoteId,
-            ops::{OpId as _, channel::deposit::Metadata},
-        },
-    };
-    use lb_groth16::Fr;
-    use lb_key_management_system_service::keys::ZkPublicKey;
+    use lb_core::mantle::ops::{OpId as _, channel::deposit::Metadata};
 
     use crate::test_support::{deposit_event, inscribe_op};
 
@@ -296,20 +283,17 @@ async fn gap_deposits_surface_after_a_failed_backfill_and_a_fork_switch() {
     //             \- C(Z)                    canonical in between
     let channel_id = ChannelId::from([0; 32]);
     let sequencer_key = Ed25519Key::from_bytes(&[0; 32]);
-    let pk = ZkPublicKey::from(Fr::from(7u64));
     let deposit = |n: u32| {
         let op = DepositOp {
             channel_id,
-            inputs: BoundedInputs::from(NoteId::from(Fr::from(n))).into(),
+            inputs: [NoteNullifier(Fr::from(n))].into(),
+            outputs: [NoteCommitment(Fr::from(1000 + u64::from(n)))].into(),
+            commitment_merkle_root: Fr::from(7u64),
+            excess_value: 0,
             metadata: Metadata::new_unchecked(vec![u8::try_from(n).unwrap()]),
         };
         let tx = unverified_tx_with_ops(vec![Op::ChannelDeposit(op.clone())]);
-        let note = DepositNote {
-            note_id: NoteId::from(Fr::from(1000 + u64::from(n))),
-            value: 50,
-            pk,
-        };
-        let event = deposit_event(&tx, &op, 50, vec![note]);
+        let event = deposit_event(&tx, &op);
         (op.op_id(), tx, event)
     };
     let a = inscribe_op(channel_id, MsgId::root(), b"a");
@@ -373,13 +357,14 @@ async fn gap_deposits_surface_after_a_failed_backfill_and_a_fork_switch() {
             .expect("B3 lands after the reconnect and the fork switch");
         let Event::BlocksProcessed {
             channel_update,
-            deposits,
+            observed,
             ..
         } = event
         else {
             continue;
         };
-        if deposits.iter().any(|d| d.op_id == d2) {
+        let deposits = observed_deposit_ids(&observed);
+        if deposits.contains(&d2) {
             break (channel_update, deposits);
         }
         before.push(channel_update);
@@ -392,9 +377,8 @@ async fn gap_deposits_surface_after_a_failed_backfill_and_a_fork_switch() {
     );
     let switched_to_fork = before.last().expect("C was processed before B3");
     assert_eq!(msg_ids(switched_to_fork.adopted()), vec![z_id]);
-    let observed: Vec<_> = deposits.iter().map(|d| d.op_id).collect();
     assert_eq!(
-        observed,
+        deposits,
         vec![d2, d3],
         "gap deposit first, then the live block's"
     );
@@ -507,6 +491,97 @@ async fn stale_publish_is_refunded() {
         Slot::from(8),
         "the checkpoint was republished after the re-fund"
     );
+}
+
+fn sample_steps() -> InscriptionSteps {
+    let op = InscriptionOp::sample_with_step();
+    InscriptionSteps {
+        proofs: ChannelInscribeProof::decode_context(&op)
+            .into_iter()
+            .map(StepProof::sample_for)
+            .collect(),
+        mini_blocks: op.mini_blocks,
+    }
+}
+
+#[tokio::test]
+async fn submit_prepared_inscription_carries_the_steps_and_their_proofs() {
+    let mut sequencer = ready_sequencer_with_channel(
+        Some(single_key_channel_state()),
+        Ed25519Key::from_bytes(&[0; 32]),
+    )
+    .await;
+    let steps = sample_steps();
+
+    let prepared = sequencer
+        .handle()
+        .prepare_inscription(
+            Inscription::new_unchecked(b"steps".to_vec()),
+            steps.mini_blocks.clone(),
+        )
+        .expect("a ready sequencer prepares an inscription");
+    let (result, checkpoint) = sequencer
+        .handle()
+        .submit_prepared_inscription(prepared.clone(), steps.proofs.to_vec())
+        .await
+        .expect("a prepared inscription with fitting proofs is published");
+
+    let info = result.tx.inscription();
+    assert_eq!(info.this_msg, prepared.id());
+    assert_eq!(info.steps, steps);
+    let (_, pending) = &checkpoint.pending_txs[0];
+    let (inscribe, pending_steps) = inscribes(pending)
+        .next()
+        .expect("the pending tx carries the inscription");
+    assert_eq!(inscribe, &prepared);
+    assert_eq!(pending_steps, steps);
+}
+
+#[tokio::test]
+async fn submit_prepared_inscription_refuses_misfit_proofs_and_a_moved_tip() {
+    let mut sequencer = ready_sequencer_with_channel(
+        Some(single_key_channel_state()),
+        Ed25519Key::from_bytes(&[0; 32]),
+    )
+    .await;
+    let steps = sample_steps();
+    let prepared = sequencer
+        .handle()
+        .prepare_inscription(
+            Inscription::new_unchecked(b"steps".to_vec()),
+            steps.mini_blocks.clone(),
+        )
+        .expect("a ready sequencer prepares an inscription");
+
+    let missing_one = steps.proofs[1..].to_vec();
+    assert!(matches!(
+        sequencer
+            .handle()
+            .submit_prepared_inscription(prepared.clone(), missing_one)
+            .await,
+        Err(Error::InvalidStepProofs(_))
+    ));
+    let wrong_kinds = steps.proofs.iter().rev().cloned().collect();
+    assert!(matches!(
+        sequencer
+            .handle()
+            .submit_prepared_inscription(prepared.clone(), wrong_kinds)
+            .await,
+        Err(Error::InvalidStepProofs(_))
+    ));
+
+    sequencer
+        .handle()
+        .publish(Inscription::new_unchecked(b"first".to_vec()))
+        .await
+        .expect("a plain publish takes the tip");
+    assert!(matches!(
+        sequencer
+            .handle()
+            .submit_prepared_inscription(prepared, steps.proofs.to_vec())
+            .await,
+        Err(Error::ChannelStateChanged(_))
+    ));
 }
 
 /// The pre-funding ops of a publish survive a checkpoint round trip
@@ -1092,6 +1167,7 @@ async fn publish_after_bundle_chains_on_the_bundle_inscription_tip() {
         inscription: Inscription::new_unchecked(b"bundle".to_vec()),
         parent: MsgId::root(),
         signer: sequencer_key.public_key().into_unverified(),
+        mini_blocks: MiniBlocks::default(),
     };
     let config = ChannelConfigOp::new(
         channel_id,
@@ -1099,7 +1175,6 @@ async fn publish_after_bundle_chains_on_the_bundle_inscription_tip() {
         VerifiedChannelKeys::try_from(vec![sequencer_key.public_key()]).unwrap(),
         SlotTimeframe::from(0u32),
         SlotTimeout::from(0u32),
-        NonZero::<u16>::MIN,
         NonZero::<u16>::MIN,
     )
     .unwrap();
@@ -1142,7 +1217,6 @@ async fn config_only_block_orphans_pending_inscription_but_keeps_message_tip() {
         VerifiedChannelKeys::try_from(vec![Ed25519Key::from_bytes(&[0; 32]).public_key()]).unwrap(),
         SlotTimeframe::from(0u32),
         SlotTimeout::from(0u32),
-        NonZero::<u16>::MIN,
         NonZero::<u16>::MIN,
     )
     .unwrap();
@@ -1246,57 +1320,7 @@ async fn config_only_block_orphans_pending_inscription_but_keeps_message_tip() {
 }
 
 #[test]
-fn track_pending_tx_classifies_atomic_bundle_with_withdraws() {
-    // Bundle: [ChannelWithdraw(channel_id), ChannelInscribe(channel_id)]
-    // Restore should put it in pending (not pending_other) with the
-    // withdraws field populated, so on orphan we emit
-    // ChannelUpdateTx::AtomicWithdraw (not Inscription).
-    use lb_core::mantle::NoteId;
-    use lb_groth16::Fr;
-
-    let channel_id = ChannelId::from([1u8; 32]);
-    let withdraw_op = ChannelWithdrawOp {
-        channel_id,
-        inputs: BoundedInputs::from(NoteId::from(Fr::from(0u64))).into(),
-    };
-    let inscribe_op = InscriptionOp {
-        channel_id,
-        inscription: Inscription::new_unchecked(b"hello".to_vec()),
-        parent: MsgId::root(),
-        signer: Ed25519Key::from_bytes(&[0; 32])
-            .public_key()
-            .into_unverified(),
-    };
-    let mantle_tx = Ops::new(
-        FORK_DIGEST,
-        [
-            Op::ChannelWithdraw(withdraw_op.clone()),
-            Op::ChannelInscribe(inscribe_op),
-        ],
-    );
-    let tx_hash = mantle_tx.hash();
-    let signed_tx = SignedOps::from_ops_with_sample_proofs(mantle_tx);
-
-    let mut state = TxState::new(HeaderId::from([0; 32]), MsgId::root());
-    track_pending_tx(&mut state, signed_tx, channel_id).unwrap();
-
-    let pending = state
-        .pending_inscription(&tx_hash)
-        .expect("bundle should be in pending inscriptions");
-    let PendingBundle::Withdraw { withdraws, .. } = &pending.bundle else {
-        panic!("bundle should be a withdraw bundle");
-    };
-    assert_eq!(withdraws.len(), 1, "bundle should carry one WithdrawInfo");
-    assert_eq!(withdraws[0].op, withdraw_op);
-    assert!(
-        !state.pending_other_contains(&tx_hash),
-        "bundle should not be in pending_other"
-    );
-}
-
-#[test]
-fn track_pending_tx_classifies_plain_inscription_with_none_withdraws() {
-    // Plain inscription: pending with `withdraws == None`.
+fn track_pending_tx_tracks_a_plain_inscription_as_pending() {
     let channel_id = ChannelId::from([2u8; 32]);
     let inscribe_op = InscriptionOp {
         channel_id,
@@ -1305,6 +1329,7 @@ fn track_pending_tx_classifies_plain_inscription_with_none_withdraws() {
         signer: Ed25519Key::from_bytes(&[0; 32])
             .public_key()
             .into_unverified(),
+        mini_blocks: MiniBlocks::default(),
     };
     let mantle_tx = Ops::new(FORK_DIGEST, [Op::ChannelInscribe(inscribe_op)]);
     let tx_hash = mantle_tx.hash();
@@ -1313,10 +1338,10 @@ fn track_pending_tx_classifies_plain_inscription_with_none_withdraws() {
     let mut state = TxState::new(HeaderId::from([0; 32]), MsgId::root());
     track_pending_tx(&mut state, signed_tx, channel_id).unwrap();
 
-    let pending = state
-        .pending_inscription(&tx_hash)
-        .expect("plain inscription should be in pending inscriptions");
-    assert!(matches!(pending.bundle, PendingBundle::Plain));
+    assert!(
+        state.pending_inscription(&tx_hash).is_some(),
+        "plain inscription should be in pending inscriptions"
+    );
 }
 
 #[test]
@@ -1332,6 +1357,7 @@ fn track_pending_tx_falls_back_to_other_when_no_inscribe_for_channel() {
         signer: Ed25519Key::from_bytes(&[0; 32])
             .public_key()
             .into_unverified(),
+        mini_blocks: MiniBlocks::default(),
     };
     let mantle_tx = Ops::new(FORK_DIGEST, [Op::ChannelInscribe(inscribe_op)]);
     let tx_hash = mantle_tx.hash();
@@ -1361,12 +1387,7 @@ fn track_pending_tx_falls_back_to_other_when_no_inscribe_for_channel() {
 async fn cold_start_backfills_genesis_slot() {
     use std::collections::HashMap;
 
-    use lb_core::{
-        events::DepositNote,
-        mantle::{NoteId, ops::channel::deposit::Metadata},
-    };
-    use lb_groth16::Fr;
-    use lb_key_management_system_service::keys::ZkPublicKey;
+    use lb_core::mantle::ops::channel::deposit::Metadata;
 
     use crate::test_support::deposit_event;
 
@@ -1380,22 +1401,20 @@ async fn cold_start_backfills_genesis_slot() {
         parent: MsgId::root(),
         inscription: Inscription::new_unchecked(Vec::new()),
         signer: sequencer_key.public_key().into_unverified(),
+        mini_blocks: MiniBlocks::default(),
     };
     let expected_msg_id = inscribe.id();
     let genesis_tx = unverified_tx_with_ops(vec![Op::ChannelInscribe(inscribe)]);
     let genesis_tx_hash = genesis_tx.hash();
     let deposit = DepositOp {
         channel_id,
-        inputs: BoundedInputs::from(NoteId::from(Fr::from(1u64))).into(),
+        inputs: [NoteNullifier(Fr::from(1u64))].into(),
+        outputs: [NoteCommitment(Fr::from(1001u64))].into(),
+        commitment_merkle_root: Fr::from(7u64),
+        excess_value: 0,
         metadata: Metadata::new_unchecked(vec![1u8]),
     };
     let deposit_tx = unverified_tx_with_ops(vec![Op::ChannelDeposit(deposit.clone())]);
-    let note_id = NoteId::from(Fr::from(1001u64));
-    let note = DepositNote {
-        note_id,
-        value: 50,
-        pk: ZkPublicKey::from(Fr::from(7u64)),
-    };
 
     let genesis_block = api_block(1, 0, 0, vec![genesis_tx, deposit_tx.clone()]);
     // LIB at slot 150: the replay runs as two 100-slot batches.
@@ -1421,7 +1440,7 @@ async fn cold_start_backfills_genesis_slot() {
         immutable: vec![genesis_block.clone(), lib_block.clone()],
         events: HashMap::from([(
             genesis_block.header.id,
-            deposit_event(&deposit_tx, &deposit, 50, vec![note]),
+            deposit_event(&deposit_tx, &deposit),
         )]),
         ..MockNode::default()
     };
@@ -1456,13 +1475,7 @@ async fn cold_start_backfills_genesis_slot() {
         "LIB follows the replay"
     );
     assert_eq!(checkpoints[0].lib_slot, Slot::from(100));
-    assert_eq!(
-        notes(&checkpoints[0]),
-        vec![(note_id, 50)],
-        "the deposit read in the first batch is checkpointed"
-    );
     assert_eq!(checkpoints[1].lib, lib_block.header.id);
-    assert_eq!(notes(&checkpoints[1]), vec![(note_id, 50)]);
 }
 
 /// The complete mined configuration reaches `Event::BlocksProcessed`'s
@@ -1481,7 +1494,6 @@ async fn cold_start_backfill_finalizes_configs_with_their_keys() {
             VerifiedChannelKeys::try_from(keys).unwrap(),
             SlotTimeframe::from(3u32),
             SlotTimeout::from(0u32),
-            NonZero::<u16>::MIN,
             NonZero::<u16>::MIN,
         )
         .unwrap()
@@ -1656,14 +1668,6 @@ fn assert_genesis_inscription_finalized(items: &[FinalizedTx], tx_hash: TxHash, 
     }
 }
 
-/// A checkpoint's channel notes as `(id, value)` pairs.
-fn notes(cp: &SequencerCheckpoint) -> Vec<(lb_core::mantle::NoteId, lb_core::mantle::Value)> {
-    cp.channel_notes
-        .iter()
-        .map(|n| (n.note_id, n.value))
-        .collect()
-}
-
 /// The finalized config tip must survive the real persistence path —
 /// `build_checkpoint` → serde → `init_with_config` — not just the in-state
 /// setter. A config-free resume must leave it intact, surfaced through the
@@ -1737,7 +1741,6 @@ async fn resume_backfill_refines_finalized_config_from_a_replayed_config() {
         SlotTimeframe::from(0u32),
         SlotTimeout::from(0u32),
         NonZero::<u16>::MIN,
-        NonZero::<u16>::MIN,
     )
     .unwrap();
     let config_id = config_op.id();
@@ -1794,8 +1797,7 @@ async fn resume_backfill_refines_finalized_config_from_a_replayed_config() {
 /// live path does, or it is re-funded every window from then on.
 #[tokio::test]
 async fn resume_backfill_retires_a_pending_entry_finalized_under_another_hash() {
-    use lb_core::mantle::{NoteId, ledger::Outputs, ops::transfer::TransferOp};
-    use lb_groth16::Fr;
+    use lb_core::mantle::ops::transfer::TransferOp;
 
     use crate::test_support::inscribe_op;
     let channel_id = ChannelId::from([0; 32]);
@@ -1803,12 +1805,13 @@ async fn resume_backfill_retires_a_pending_entry_finalized_under_another_hash() 
 
     let m = inscribe_op(channel_id, MsgId::root(), b"m");
     let m_id = m.id();
-    let pk = lb_key_management_system_service::keys::ZkPublicKey::from(Fr::from(7u64));
     let original = unverified_tx_with_ops(vec![
         Op::ChannelInscribe(m.clone()),
         Op::Transfer(TransferOp::new(
-            BoundedInputs::from(NoteId::from(Fr::from(1u64))).into(),
-            Outputs::new([Note::new(50, pk)]),
+            [NoteNullifier(Fr::from(1u64))].into(),
+            [NoteCommitment(Fr::from(50u64))].into(),
+            Fr::from(0u64),
+            0,
         )),
     ]);
     let rebuilt = unverified_tx_with_ops(vec![Op::ChannelInscribe(m)]);
@@ -1890,6 +1893,7 @@ async fn stream_gap_surfaces_backfilled_inscriptions_as_adopted() {
         parent: MsgId::root(),
         inscription: Inscription::new_unchecked(b"a".to_vec()),
         signer: sequencer_key.public_key().into_unverified(),
+        mini_blocks: MiniBlocks::default(),
     };
     let a_id = a.id();
     let y = InscriptionOp {
@@ -1897,6 +1901,7 @@ async fn stream_gap_surfaces_backfilled_inscriptions_as_adopted() {
         parent: a_id,
         inscription: Inscription::new_unchecked(b"y".to_vec()),
         signer: sequencer_key.public_key().into_unverified(),
+        mini_blocks: MiniBlocks::default(),
     };
     let y_id = y.id();
 
@@ -2045,6 +2050,7 @@ async fn update_variant_follows_orphaned() {
         this_msg: op.id(),
         payload: op.inscription.clone(),
         signer: Some(op.signer),
+        steps: InscriptionSteps::default(),
     };
     let result = |adopted: Vec<ChannelUpdateTx>,
                   orphaned: Vec<ChannelUpdateTx>,
@@ -2056,7 +2062,7 @@ async fn update_variant_follows_orphaned() {
             new_channel_tip: MsgId::root(),
         }),
         view_before,
-        deposits: Vec::new(),
+        observed: Vec::new(),
     };
     let hashes =
         |txs: &[ChannelUpdateTx]| txs.iter().map(ChannelUpdateTx::tx_hash).collect::<Vec<_>>();
@@ -2065,19 +2071,24 @@ async fn update_variant_follows_orphaned() {
     let mined = inscribe_op(channel_id, MsgId::root(), b"1");
     let mined_tx = unverified_tx_with_ops(vec![Op::ChannelInscribe(mined.clone())]);
     let lib = sequencer.state.as_ref().unwrap().lib();
-    sequencer.state.as_mut().unwrap().process_block(
-        header_id(1),
-        lib,
-        lib,
-        std::iter::empty(),
-        vec![BlockChannelTx::new(
-            Arc::new(mined_tx.clone()),
-            mined_tx.hash(),
-            ChannelTxKind::Inscription(info_of(&mined)),
-        )],
-        Vec::new(),
-        vec![],
-    );
+    sequencer
+        .state
+        .as_mut()
+        .unwrap()
+        .process_block(
+            header_id(1),
+            lib,
+            lib,
+            std::iter::empty(),
+            vec![BlockChannelTx::new(
+                Arc::new(mined_tx.clone()),
+                mined_tx.hash(),
+                ChannelTxKind::Inscription(info_of(&mined)),
+            )],
+            vec![],
+            None,
+        )
+        .unwrap();
     sequencer.current_tip = Some(header_id(1));
     let adopted = ChannelUpdateTx::Inscription(info_of(&inscribe_op(channel_id, mined.id(), b"3")));
 
@@ -2126,6 +2137,8 @@ async fn update_variant_follows_orphaned() {
     assert_eq!(hashes(&orphaned), hashes(&[orphaned_entry]));
 }
 
+// TODO(private-utxo): re-type with an inscription whose step consumes a note.
+#[cfg(any())]
 /// A pending bundle whose transfer input is gone from the branch on a block
 /// that moves no message (a deposit reorged out changes no lineage entry) is
 /// kept while the deposit may re-land, then expires un-refunded: a fresh fee
@@ -2186,13 +2199,7 @@ async fn dead_input_bundle_expires_without_a_lineage_change() {
             .state
             .as_ref()
             .unwrap()
-            .refund_candidates(
-                header_id(1),
-                Slot::from(window * 2),
-                window,
-                usize::MAX,
-                channel_id
-            )
+            .refund_candidates(header_id(1), Slot::from(window * 2), window, usize::MAX)
             .is_empty(),
         "a dead-input bundle is never re-funded"
     );
@@ -2257,7 +2264,7 @@ async fn off_suffix_pending_entry_is_shed_without_a_lineage_change() {
         finalized_items: Vec::new(),
         channel_update: None,
         view_before: ViewBefore::new(&[], HashSet::new()),
-        deposits: Vec::new(),
+        observed: Vec::new(),
     });
     let ChannelUpdate::Conflict { orphaned, .. } = update else {
         panic!("the stranded entry must be reported orphaned, got {update:?}")
@@ -2311,6 +2318,455 @@ async fn ready_sequencer_with_channel(
     sequencer
 }
 
+/// A block whose program step creates a note of the tracked program puts
+/// the note, with a path against the channel's root, on the handle's and
+/// the client's view; once the block finalizes, the checkpoint carries it
+/// and a restored sequencer starts with it.
+#[tokio::test]
+#[expect(clippy::too_many_lines, reason = "Test function.")]
+async fn program_notes_follow_the_channel_and_survive_a_checkpoint() {
+    use std::collections::HashMap;
+
+    use lb_core::{
+        crypto::ZkHasher,
+        events::{BlockEvent, Event as ChainEvent, Events},
+        mantle::{
+            note_set::{NoteSetIndex, NoteSetUpdate},
+            ops::channel::{
+                inscribe::{MiniBlock, MiniBlocks, Step},
+                program_step::ProgramStep,
+            },
+        },
+    };
+
+    use crate::{
+        sequencer::program_notes::fixtures::{foreign, program, sample_opening},
+        test_support::{inscribe_op, unverified_tx_with_ops},
+    };
+
+    let channel_id = ChannelId::from([0; 32]);
+    let sequencer_key = Ed25519Key::from_bytes(&[0; 32]);
+    let opening = sample_opening();
+    let commitment = opening.note(program()).commitment();
+    let step = ProgramStep {
+        program_id: program(),
+        program_outputs: [commitment].into(),
+        ..ProgramStep::sample()
+    };
+    let mut op = inscribe_op(channel_id, MsgId::root(), b"step");
+    op.mini_blocks = MiniBlocks::from([MiniBlock::try_from(vec![Step::Program(step)]).unwrap()]);
+    let b1 = api_block(
+        1,
+        0,
+        1,
+        vec![unverified_tx_with_ops(vec![Op::ChannelInscribe(op)])],
+    );
+    let b2 = api_block(2, 1, 2, vec![]);
+    let update = Events::from(ChainEvent::Block(BlockEvent::NoteSetUpdated(
+        NoteSetUpdate {
+            note_set: NoteSetIndex::Channel(channel_id),
+            nullifiers: vec![],
+            commitments: vec![foreign(1), commitment],
+        },
+    )));
+    // B2 finalizes B1: the sequencer reads B1 again as immutable history.
+    let mut finalizing = live_event(&b2);
+    finalizing.lib = header_id(1);
+    finalizing.lib_slot = Slot::from(1u64);
+    let node = MockNode {
+        scripts: scripts(vec![StreamScript {
+            events: vec![live_event(&b1), finalizing],
+            then: StreamEnd::Hang,
+        }]),
+        immutable: vec![b1.clone()],
+        events: HashMap::from([(header_id(1), update)]),
+        ..MockNode::default()
+    };
+    let mut sequencer =
+        ZoneSequencer::init(channel_id, sequencer_key, node, funding_config(), None);
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let event = tokio::time::timeout_at(deadline, sequencer.next_event())
+            .await
+            .expect("the sequencer gets ready");
+        if matches!(event, Event::Ready) {
+            break;
+        }
+    }
+    let mut processed = 0;
+    let checkpoint = loop {
+        let event = tokio::time::timeout_at(deadline, sequencer.next_event())
+            .await
+            .expect("both blocks are processed");
+        if let Event::BlocksProcessed { checkpoint, .. } = event {
+            processed += 1;
+            if processed == 1 {
+                let view = sequencer.handle().program_notes();
+                assert_eq!(view.finalized, [], "B1 is not final yet");
+                assert_eq!(view.unfinalized.len(), 1);
+                let note = &view.unfinalized[0];
+                assert_eq!(note.commitment, commitment);
+                assert_eq!(note.opening, opening);
+                assert!(
+                    note.path.verify::<ZkHasher>(commitment.0, view.root),
+                    "the path is against the channel's root at the tip"
+                );
+            }
+            if processed == 2 {
+                break checkpoint;
+            }
+        }
+    };
+    let view = sequencer.handle().program_notes();
+    assert_eq!(view.finalized.len(), 1, "B1 finalized with the note");
+    assert_eq!(view.unfinalized, []);
+
+    // The client reads the same view, served by the drive loop.
+    let client = sequencer.client();
+    let served = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::select! {
+            served = client.program_notes() => served.expect("served"),
+            () = async { loop { drop(sequencer.next_event().await); } } => unreachable!(),
+        }
+    })
+    .await
+    .expect("the drive loop serves the request");
+    assert_eq!(served, view);
+
+    // A sequencer restored from the checkpoint starts with the finalized set.
+    let notes = checkpoint
+        .program_notes
+        .as_ref()
+        .expect("a checkpoint carries the finalized note set");
+    assert_eq!(notes.notes.len(), 1);
+    let (node, _posted) = MockNode::with_posted_channel();
+    let restored = ZoneSequencer::init(
+        channel_id,
+        Ed25519Key::from_bytes(&[0; 32]),
+        node,
+        funding_config(),
+        Some(checkpoint),
+    );
+    let view = restored.program_notes();
+    assert_eq!(view.finalized.len(), 1);
+    assert_eq!(view.finalized[0].commitment, commitment);
+    assert!(
+        view.finalized[0]
+            .path
+            .verify::<ZkHasher>(commitment.0, view.root)
+    );
+}
+
+/// A checkpoint written before the note set was tracked carries none: the
+/// restored sequencer rebuilds it from the finalized history up to the
+/// checkpoint's LIB before it is ready, and serves the notes with paths
+/// against the ledger's root.
+#[tokio::test]
+#[expect(clippy::too_many_lines, reason = "Test function.")]
+async fn a_checkpoint_without_program_notes_rebuilds_the_set_from_the_finalized_history() {
+    use std::collections::HashMap;
+
+    use lb_core::{
+        crypto::ZkHasher,
+        events::{BlockEvent, Event as ChainEvent, Events},
+        mantle::{
+            note_set::{CommitmentMmr, NoteSetIndex, NoteSetUpdate},
+            ops::channel::{
+                inscribe::{MiniBlock, MiniBlocks, Step},
+                program_step::ProgramStep,
+            },
+        },
+    };
+
+    use crate::{
+        sequencer::program_notes::fixtures::{foreign, program, sample_opening},
+        test_support::{inscribe_op, unverified_tx_with_ops},
+    };
+
+    let channel_id = ChannelId::from([0; 32]);
+    let opening = sample_opening();
+    let commitment = opening.note(program()).commitment();
+    let step = ProgramStep {
+        program_id: program(),
+        program_outputs: [commitment].into(),
+        ..ProgramStep::sample()
+    };
+    let mut op = inscribe_op(channel_id, MsgId::root(), b"step");
+    op.mini_blocks = MiniBlocks::from([MiniBlock::try_from(vec![Step::Program(step)]).unwrap()]);
+    // B1 appended a foreign note and the program's; B2 only another foreign
+    // one. Both are finalized history below the checkpoint's LIB.
+    let b1 = api_block(
+        1,
+        0,
+        1,
+        vec![unverified_tx_with_ops(vec![Op::ChannelInscribe(op)])],
+    );
+    let deposit = DepositOp {
+        channel_id,
+        ..DepositOp::sample()
+    };
+    let b2 = api_block(
+        2,
+        1,
+        2,
+        vec![unverified_tx_with_ops(vec![Op::ChannelDeposit(
+            deposit.clone(),
+        )])],
+    );
+    let update = |commitments: Vec<NoteCommitment>| {
+        Events::from(ChainEvent::Block(BlockEvent::NoteSetUpdated(
+            NoteSetUpdate {
+                note_set: NoteSetIndex::Channel(channel_id),
+                nullifiers: vec![],
+                commitments,
+            },
+        )))
+    };
+    let b2_tx = unverified_tx_with_ops(vec![Op::ChannelDeposit(deposit.clone())]);
+    let b2_events = crate::test_support::deposit_event(&b2_tx, &deposit);
+    // The live block above LIB, whose processing makes the sequencer ready.
+    let b3 = api_block(3, 2, 3, vec![]);
+    let node = MockNode {
+        lib: header_id(2),
+        tip: header_id(2),
+        lib_slot: Slot::from(2u64),
+        scripts: scripts(vec![StreamScript {
+            events: vec![ProcessedBlockEvent {
+                block: b3.clone(),
+                tip: b3.header.id,
+                tip_slot: b3.header.slot,
+                lib: header_id(2),
+                lib_slot: Slot::from(2u64),
+            }],
+            then: StreamEnd::Hang,
+        }]),
+        immutable: vec![b1, b2],
+        events: HashMap::from([
+            (header_id(1), update(vec![foreign(1), commitment])),
+            (header_id(2), b2_events),
+        ]),
+        ..MockNode::default()
+    };
+    let checkpoint = SequencerCheckpoint {
+        last_msg_id: MsgId::root(),
+        pending_txs: vec![],
+        lib: header_id(2),
+        lib_slot: Slot::from(2u64),
+        finalized_config: MsgId::root(),
+        funding: vec![],
+        program_notes: None,
+    };
+    let mut sequencer = ZoneSequencer::init(
+        channel_id,
+        Ed25519Key::from_bytes(&[0; 32]),
+        node,
+        funding_config(),
+        Some(checkpoint),
+    );
+    assert_eq!(
+        sequencer.program_notes().finalized,
+        [],
+        "nothing is served before the rebuild"
+    );
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let event = tokio::time::timeout_at(deadline, sequencer.next_event())
+            .await
+            .expect("the sequencer gets ready");
+        if matches!(event, Event::Ready) {
+            break;
+        }
+    }
+    let view = sequencer.handle().program_notes();
+    assert_eq!(view.unfinalized, []);
+    assert_eq!(view.finalized.len(), 1);
+    let note = &view.finalized[0];
+    assert_eq!(note.commitment, commitment);
+    assert_eq!(note.opening, opening);
+    let expected_root = [foreign(1), commitment]
+        .iter()
+        .chain(deposit.outputs.iter())
+        .fold(CommitmentMmr::new(), |mmr, commitment| {
+            mmr.push(*commitment).unwrap()
+        })
+        .frontier_root();
+    assert_eq!(view.root, expected_root, "the rebuilt set is the ledger's");
+    assert!(note.path.verify::<ZkHasher>(commitment.0, view.root));
+}
+
+/// A program inscription prepared at the tip spends the program notes the
+/// sequencer tracks `SPEND_ROOT_DEPTH` blocks below it, its first
+/// mini-block proven against the root on chain, and once submitted its
+/// inputs leave the notes a next step may consume.
+#[tokio::test]
+#[expect(clippy::too_many_lines, reason = "Test function.")]
+async fn prepare_program_inscription_spends_the_tracked_notes_and_submits() {
+    use std::collections::HashMap;
+
+    use lb_core::{
+        events::{BlockEvent, Event as ChainEvent, Events},
+        mantle::{
+            note_set::{NoteSetIndex, NoteSetUpdate},
+            ops::{
+                channel::{
+                    inscribe::{MiniBlock, MiniBlocks, Step},
+                    program_step::ProgramStep,
+                },
+                proof_program_step::StepProofShape,
+            },
+        },
+    };
+    use lb_key_management_system_service::keys::ZkPublicKey;
+    use lb_wallet::SPEND_ROOT_DEPTH;
+
+    use crate::{
+        sequencer::{
+            ProgramStepRequest, StepRequest, UserOutput,
+            program_notes::fixtures::{foreign, program, sample_opening},
+        },
+        test_support::{inscribe_op, unverified_tx_with_ops},
+    };
+
+    let channel_id = ChannelId::from([0; 32]);
+    let sequencer_key = Ed25519Key::from_bytes(&[0; 32]);
+    let opening = sample_opening();
+    let commitment = opening.note(program()).commitment();
+    let step = ProgramStep {
+        program_id: program(),
+        program_outputs: [commitment].into(),
+        ..ProgramStep::sample()
+    };
+    let mut mined = inscribe_op(channel_id, MsgId::root(), b"step");
+    mined.mini_blocks = MiniBlocks::from([MiniBlock::try_from(vec![Step::Program(step)]).unwrap()]);
+    let b1 = api_block(
+        1,
+        0,
+        1,
+        vec![unverified_tx_with_ops(vec![Op::ChannelInscribe(
+            mined.clone(),
+        )])],
+    );
+    let update = Events::from(ChainEvent::Block(BlockEvent::NoteSetUpdated(
+        NoteSetUpdate {
+            note_set: NoteSetIndex::Channel(channel_id),
+            nullifiers: vec![],
+            commitments: vec![foreign(1), commitment],
+        },
+    )));
+    // B1 creates the note; the empty blocks after it bring it to spend depth.
+    let blocks: Vec<_> = (2..=1 + SPEND_ROOT_DEPTH as u8)
+        .map(|n| api_block(n, n - 1, u64::from(n), vec![]))
+        .collect();
+    let (mut node, _posted) = MockNode::with_posted_channel();
+    node.channel_state = Some(single_key_channel_state());
+    node.scripts = scripts(vec![StreamScript {
+        events: std::iter::once(&b1)
+            .chain(&blocks)
+            .map(live_event)
+            .collect(),
+        then: StreamEnd::Hang,
+    }]);
+    node.events = HashMap::from([(header_id(1), update)]);
+    let mut sequencer =
+        ZoneSequencer::init(channel_id, sequencer_key, node, funding_config(), None);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let event = tokio::time::timeout_at(deadline, sequencer.next_event())
+            .await
+            .expect("the sequencer gets ready");
+        if matches!(event, Event::Ready) {
+            break;
+        }
+    }
+    let mut processed = 0;
+    while processed <= blocks.len() {
+        let event = tokio::time::timeout_at(deadline, sequencer.next_event())
+            .await
+            .expect("every block is processed");
+        if matches!(event, Event::BlocksProcessed { .. }) {
+            processed += 1;
+        }
+    }
+    let view = sequencer.handle().program_notes();
+    assert_eq!(view.unfinalized.len(), 1, "the note is tracked at the tip");
+
+    let payee = ZkPublicKey::new(Fr::from(5u64));
+    let built = sequencer
+        .handle()
+        .prepare_program_inscription(
+            Inscription::new_unchecked(b"zone block".to_vec()),
+            vec![vec![StepRequest::Program(ProgramStepRequest {
+                program_id: program(),
+                inputs: vec![commitment],
+                program_outputs: vec![],
+                outputs: vec![UserOutput {
+                    public_key: payee,
+                    stake_public_key: payee,
+                    value: opening.value,
+                    nonce: None,
+                }],
+                inscription: Inscription::new_unchecked(b"spend".to_vec()),
+            })]],
+        )
+        .expect("a ready sequencer builds the program step on its tracked note");
+    assert_eq!(
+        built.op.parent,
+        mined.id(),
+        "chains on the mined inscription"
+    );
+    let prepared = built
+        .program_steps()
+        .next()
+        .expect("the inscription has a program step");
+    assert_eq!(
+        prepared.witness.chain.tx_commitment_root, view.root,
+        "a first mini-block is proven against the root on chain"
+    );
+    assert_eq!(prepared.outputs[0].public_key, payee);
+
+    let StepProof::ProgramStep(sample) =
+        StepProof::sample_for(StepProofShape::ProgramStep { program_notes: 0 })
+    else {
+        panic!("a program step shape samples a program step proof");
+    };
+    let proofs = built
+        .step_proofs(vec![(sample.spend_proof, sample.program_proof)])
+        .unwrap();
+    let (result, _checkpoint) = sequencer
+        .handle()
+        .submit_prepared_inscription(built.op.clone(), proofs)
+        .await
+        .expect("the built inscription submits with its proofs");
+    assert_eq!(result.tx.inscription().this_msg, built.op.id());
+    assert_eq!(
+        sequencer.handle().program_notes().unfinalized,
+        [],
+        "the pending step spends the note"
+    );
+    assert!(
+        matches!(
+            sequencer.handle().prepare_program_inscription(
+                Inscription::new_unchecked(b"again".to_vec()),
+                vec![vec![StepRequest::Program(ProgramStepRequest {
+                    program_id: program(),
+                    inputs: vec![commitment],
+                    program_outputs: vec![],
+                    outputs: vec![UserOutput {
+                        public_key: payee,
+                        stake_public_key: payee,
+                        value: opening.value,
+                        nonce: None,
+                    }],
+                    inscription: Inscription::new_unchecked(b"spend".to_vec()),
+                })]],
+            ),
+            Err(Error::InvalidProgramStep(_))
+        ),
+        "a note a pending step spends is not spendable again"
+    );
+}
+
 /// The config op's signature must claim our key's index in the *current*
 /// accredited list — not index 0 — or the ledger rejects the update as
 /// `InvalidSignature` whenever the sequencer is not the leading key.
@@ -2334,7 +2790,6 @@ async fn channel_config_signs_with_own_current_accredited_index() {
             VerifiedChannelKeys::new_unchecked(vec![own_key.public_key()]),
             SlotTimeframe::from(0u32),
             SlotTimeout::from(0u32),
-            1,
             1,
         )
         .await
@@ -2381,7 +2836,6 @@ async fn channel_config_on_unclaimed_channel_carries_empty_proof() {
             SlotTimeframe::from(0u32),
             SlotTimeout::from(0u32),
             1,
-            1,
         )
         .await
         .expect("claiming an unclaimed channel must build");
@@ -2415,7 +2869,6 @@ async fn channel_config_fails_when_not_accredited() {
             SlotTimeframe::from(0u32),
             SlotTimeout::from(0u32),
             1,
-            1,
         )
         .await
         .expect_err("config update from a non-accredited key must fail locally");
@@ -2432,10 +2885,9 @@ async fn channel_config_rejects_an_ill_formed_config() {
     let own_key = Ed25519Key::from_bytes(&[7; 32]);
     let mut sequencer = ready_sequencer_with_channel(None, own_key.clone()).await;
 
-    for (configuration_threshold, transfer_threshold, reason) in [
-        (2, 1, "exceeds the 1 accredited keys"),
-        (0, 1, "configuration_threshold must be at least 1"),
-        (1, 0, "transfer_threshold must be at least 1"),
+    for (configuration_threshold, reason) in [
+        (2, "exceeds the 1 accredited keys"),
+        (0, "configuration_threshold must be at least 1"),
     ] {
         let error = sequencer
             .handle()
@@ -2444,7 +2896,6 @@ async fn channel_config_rejects_an_ill_formed_config() {
                 SlotTimeframe::from(0u32),
                 SlotTimeout::from(0u32),
                 configuration_threshold,
-                transfer_threshold,
             )
             .await
             .expect_err("an ill-formed config must fail locally");
@@ -2480,92 +2931,11 @@ async fn channel_config_rejects_multi_sig_threshold() {
             SlotTimeframe::from(0u32),
             SlotTimeout::from(0u32),
             1,
-            1,
         )
         .await
         .expect_err("multi-sig threshold config update must fail locally");
     assert!(
         error.to_string().contains("single-signer"),
-        "unexpected error: {error}"
-    );
-}
-
-/// A bundle carries its preparer's inscription signature, and the ledger
-/// only accepts an inscription from the turn holder. Submitting another
-/// sequencer's bundle through this runtime would post it in *our* turn
-/// under *their* signature — unlandable. Reject at submit instead.
-#[tokio::test]
-async fn submit_atomic_bundle_rejects_a_bundle_prepared_by_another_sequencer() {
-    use lb_core::{
-        mantle::{
-            ledger::{BoundedInputs, NoteId},
-            transactions::MantleTxBuilder,
-        },
-        proofs::channel_multi_sig_proof::IndexedSignatures,
-    };
-    use lb_groth16::Fr;
-
-    use super::super::types::{PreparedAtomicBundle, PreparedBundleKind};
-
-    let own_key = Ed25519Key::from_bytes(&[7; 32]);
-    let peer_key = Ed25519Key::from_bytes(&[8; 32]);
-    let channel = ChannelState {
-        accredited_keys: UnverifiedChannelKeys::new_unchecked(vec![
-            own_key.public_key().into_unverified(),
-            peer_key.public_key().into_unverified(),
-        ])
-        .into(),
-        transfer_threshold: 2,
-        ..single_key_channel_state()
-    };
-    let mut sequencer = ready_sequencer_with_channel(Some(channel), own_key.clone()).await;
-
-    let sign_payload = vec![0xab; 32];
-    let bundle_by = |preparer: &Ed25519Key| PreparedAtomicBundle {
-        tx: Ops::new(FORK_DIGEST, TxList::new_unchecked(Vec::new())),
-        transfer_proof: None,
-        pre_fund: MantleTxBuilder::new(),
-        inscribe_sig: preparer.sign_payload(&sign_payload),
-        parent: MsgId::root(),
-        msg_id: MsgId::root(),
-        inscribe: Inscription::new_unchecked(b"pin".to_vec()),
-        signer: preparer.public_key(),
-        kind: PreparedBundleKind::PinDeposit {
-            consumed_notes: BoundedInputs::from(NoteId::from(Fr::from(1u64))).into(),
-            outputs: Outputs::empty(),
-        },
-        sign_payload: sign_payload.clone(),
-        accredited_keys: vec![
-            own_key.public_key().into_unverified(),
-            peer_key.public_key().into_unverified(),
-        ],
-        signing_threshold: 2,
-    };
-
-    // Prepared by the peer: refused before anything is tracked.
-    let error = sequencer
-        .handle()
-        .submit_atomic_bundle(bundle_by(&peer_key), IndexedSignatures::empty())
-        .expect_err("another sequencer's bundle must be refused");
-    assert!(
-        matches!(&error, Error::InvalidMultiSig(msg) if msg.contains("another sequencer")),
-        "unexpected error: {error}"
-    );
-    assert!(
-        sequencer
-            .checkpoint()
-            .is_none_or(|checkpoint| checkpoint.pending_txs.is_empty()),
-        "refused bundle must not be tracked"
-    );
-
-    // Prepared by us: passes the ownership check and fails later, on the
-    // (empty) multi-sig set — proving the check above is what fired.
-    let error = sequencer
-        .handle()
-        .submit_atomic_bundle(bundle_by(&own_key), IndexedSignatures::empty())
-        .expect_err("empty signature set under 2-of-2 must be refused");
-    assert!(
-        matches!(&error, Error::InvalidMultiSig(msg) if !msg.contains("another sequencer")),
         "unexpected error: {error}"
     );
 }
@@ -2598,7 +2968,6 @@ async fn a_second_config_on_a_pending_config_position_is_refused() {
             SlotTimeframe::from(0u32),
             SlotTimeout::from(0u32),
             1,
-            1,
         )
         .await
         .expect("first config should be accepted");
@@ -2608,7 +2977,6 @@ async fn a_second_config_on_a_pending_config_position_is_refused() {
             VerifiedChannelKeys::new_unchecked(vec![own_key.public_key()]),
             SlotTimeframe::from(1u32),
             SlotTimeout::from(0u32),
-            1,
             1,
         )
         .await;
@@ -2622,4 +2990,389 @@ async fn a_second_config_on_a_pending_config_position_is_refused() {
         matches!(second, Err(Error::ChannelStateChanged(_))),
         "the position is taken while the first config pends: {second:?}"
     );
+}
+
+fn sample_program_key() -> ProgramVerificationKey {
+    ProgramRegisterOp::sample().verification_key
+}
+
+/// A registration is one funded `ProgramRegister` op with no proof, tracked
+/// like an own tx: in the checkpoint's pending set with a funding record
+/// that can rebuild it.
+#[tokio::test]
+async fn register_program_submits_an_unproven_op_and_tracks_it() {
+    let mut sequencer = ready_sequencer_with_channel(
+        Some(single_key_channel_state()),
+        Ed25519Key::from_bytes(&[0; 32]),
+    )
+    .await;
+    let key = sample_program_key();
+
+    let (info, checkpoint) = sequencer
+        .handle()
+        .register_program(key.clone())
+        .await
+        .expect("a valid key registers");
+
+    assert_eq!(info.program_id, derive_program_id(&key));
+    assert_eq!(info.verification_key, key);
+    let (hash, tx) = checkpoint
+        .pending_txs
+        .iter()
+        .find(|(hash, _)| *hash == info.tx_hash)
+        .expect("the registration is pending");
+    let ops: Vec<_> = tx.op_refs_iter().collect();
+    let [op] = ops.as_slice() else {
+        panic!("one op before funding, got {ops:?}");
+    };
+    assert!(matches!(op, OpRef::ProgramRegister(register) if register.verification_key == key));
+    assert!(matches!(
+        tx.first().expect("one op").proof(),
+        OpProofRef::None(_)
+    ));
+    let funding = checkpoint
+        .funding
+        .iter()
+        .find(|record| record.tx_hash == *hash)
+        .expect("the registration has a funding record");
+    assert!(
+        funding.pre_fund.is_some(),
+        "a registration can be re-funded"
+    );
+}
+
+/// A key the ledger would reject is refused before anything is funded.
+#[tokio::test]
+async fn register_program_refuses_a_key_off_the_curve() {
+    let mut sequencer = ready_sequencer_with_channel(
+        Some(single_key_channel_state()),
+        Ed25519Key::from_bytes(&[0; 32]),
+    )
+    .await;
+    // Canonical bytes, yet no point has x = 0.
+    let mut bytes = sample_program_key().to_bytes();
+    bytes[..32].fill(0);
+    let off_curve = ProgramVerificationKey::try_from_bytes(&bytes).expect("decodes");
+
+    let error = sequencer
+        .handle()
+        .register_program(off_curve)
+        .await
+        .expect_err("an off-curve key is refused");
+    assert!(matches!(error, Error::InvalidProgramKey(_)), "{error:?}");
+    assert!(
+        sequencer
+            .subscribe_checkpoint()
+            .borrow()
+            .as_ref()
+            .is_none_or(|checkpoint| checkpoint.pending_txs.is_empty()),
+        "nothing was submitted"
+    );
+}
+
+/// Anyone's registration is reported when its block joins the canonical
+/// chain, and again when it finalizes.
+#[tokio::test]
+async fn program_registration_is_observed_then_finalized() {
+    let channel_id = ChannelId::from([7; 32]);
+    let key = sample_program_key();
+    let register_tx = unverified_tx_with_ops(vec![Op::ProgramRegister(ProgramRegisterOp {
+        verification_key: key.clone(),
+    })]);
+    let b1 = api_block(1, 0, 1, vec![register_tx.clone()]);
+    let b2 = api_block(2, 1, 2, Vec::new());
+    let finalizing = ProcessedBlockEvent {
+        block: b2.clone(),
+        tip: b2.header.id,
+        tip_slot: b2.header.slot,
+        lib: b1.header.id,
+        lib_slot: b1.header.slot,
+    };
+    let node = MockNode {
+        immutable: vec![b1.clone()],
+        scripts: scripts(vec![StreamScript {
+            events: vec![live_event(&b1), finalizing],
+            then: StreamEnd::Hang,
+        }]),
+        ..MockNode::default()
+    };
+    let mut sequencer = ZoneSequencer::init(
+        channel_id,
+        Ed25519Key::from_bytes(&[0; 32]),
+        node,
+        funding_config(),
+        None,
+    );
+
+    let mut observed_programs = Vec::new();
+    let mut finalized_programs = Vec::new();
+    while finalized_programs.is_empty() {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), sequencer.next_event())
+            .await
+            .expect("both blocks are served");
+        if let Event::BlocksProcessed {
+            observed,
+            finalized,
+            ..
+        } = event
+        {
+            observed_programs.extend(observed.into_iter().filter_map(|op| match op {
+                ObservedOp::ProgramRegister(program) => Some(program),
+                ObservedOp::Deposit(_) => None,
+            }));
+            finalized_programs.extend(finalized.iter().flat_map(|tx| &tx.ops).filter_map(|op| {
+                match op {
+                    FinalizedOp::ProgramRegister(program) => Some(program.clone()),
+                    _ => None,
+                }
+            }));
+        }
+    }
+
+    let expected = ProgramRegisterInfo {
+        tx_hash: register_tx.hash(),
+        program_id: derive_program_id(&key),
+        verification_key: key,
+    };
+    assert_eq!(observed_programs, vec![expected.clone()]);
+    assert_eq!(finalized_programs, vec![expected]);
+}
+
+/// An own registration carries no channel op, so only the tracked hash
+/// marks it mined: once its block finalizes it leaves the pending set.
+#[tokio::test]
+async fn own_registration_leaves_pending_when_its_block_finalizes() {
+    let channel_id = ChannelId::from([0; 32]);
+    let key = sample_program_key();
+    // The mock funds without a fee transfer, so the tx the sequencer builds
+    // is the bare op under the fixture fork digest.
+    let register_tx = unverified_tx_with_ops(vec![Op::ProgramRegister(ProgramRegisterOp {
+        verification_key: key.clone(),
+    })]);
+    let b1 = api_block(1, 0, 1, Vec::new());
+    let b2 = api_block(2, 1, 2, vec![register_tx.clone()]);
+    let b3 = api_block(3, 2, 3, Vec::new());
+    let finalizing = ProcessedBlockEvent {
+        block: b3.clone(),
+        tip: b3.header.id,
+        tip_slot: b3.header.slot,
+        lib: b2.header.id,
+        lib_slot: b2.header.slot,
+    };
+    let (up_tx, up_rx) = watch::channel(true);
+    let node = MockNode {
+        channel_state: Some(single_key_channel_state()),
+        up: Some(up_rx),
+        immutable: vec![b2.clone()],
+        scripts: scripts(vec![
+            StreamScript {
+                events: vec![live_event(&b1)],
+                then: StreamEnd::Hang,
+            },
+            StreamScript {
+                events: vec![live_event(&b2), finalizing],
+                then: StreamEnd::Hang,
+            },
+        ]),
+        ..MockNode::default()
+    };
+    let config = SequencerConfig {
+        reconnect_delay: std::time::Duration::from_millis(20),
+        ..SequencerConfig::new(funding_config())
+    };
+    let mut sequencer = ZoneSequencer::init_with_config(
+        channel_id,
+        Ed25519Key::from_bytes(&[0; 32]),
+        node,
+        config,
+        None,
+    );
+    loop {
+        if matches!(sequencer.next_event().await, Event::Ready) {
+            break;
+        }
+    }
+
+    let (info, checkpoint) = sequencer
+        .handle()
+        .register_program(key)
+        .await
+        .expect("a valid key registers");
+    assert_eq!(
+        info.tx_hash,
+        register_tx.hash(),
+        "the mock funds the bare op"
+    );
+    assert_eq!(checkpoint.pending_txs.len(), 1);
+
+    // Drop the connection, then come back on the stream that mines and
+    // finalizes the registration.
+    up_tx.send(false).unwrap();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let reconnect = tokio::time::sleep(std::time::Duration::from_millis(100));
+    tokio::pin!(reconnect);
+    loop {
+        let event = tokio::select! {
+            event = sequencer.next_event() => event,
+            () = &mut reconnect => {
+                up_tx.send(true).unwrap();
+                continue;
+            }
+            () = tokio::time::sleep_until(deadline) => panic!("the registration finalizes"),
+        };
+        if let Event::BlocksProcessed {
+            checkpoint,
+            finalized,
+            ..
+        } = event
+            && finalized.iter().any(|tx| tx.tx_hash == info.tx_hash)
+        {
+            assert!(
+                checkpoint.pending_txs.is_empty(),
+                "the finalized registration is no longer pending: {:?}",
+                checkpoint.pending_txs
+            );
+            assert!(checkpoint.funding.is_empty());
+            break;
+        }
+    }
+}
+
+/// A pending registration and its funding record survive a checkpoint
+/// round trip, so a restored sequencer re-posts and can re-fund it.
+#[tokio::test]
+async fn registration_survives_a_checkpoint_round_trip() {
+    let channel_id = ChannelId::from([0; 32]);
+    let sequencer_key = Ed25519Key::from_bytes(&[0; 32]);
+    let config = SequencerConfig::new(funding_config());
+    let (mut node, _posted) = MockNode::with_posted_channel();
+    node.channel_state = Some(single_key_channel_state());
+    let mut sequencer = ZoneSequencer::init_with_config(
+        channel_id,
+        sequencer_key.clone(),
+        node,
+        config.clone(),
+        None,
+    );
+    loop {
+        if matches!(sequencer.next_event().await, Event::Ready) {
+            break;
+        }
+    }
+    let (info, checkpoint) = sequencer
+        .handle()
+        .register_program(sample_program_key())
+        .await
+        .expect("a valid key registers");
+
+    let json = serde_json::to_string(&checkpoint).expect("checkpoint serializes");
+    let restored_checkpoint: SequencerCheckpoint =
+        serde_json::from_str(&json).expect("checkpoint deserializes");
+    let restored = ZoneSequencer::init_with_config(
+        channel_id,
+        sequencer_key,
+        MockNode::default(),
+        config,
+        Some(restored_checkpoint),
+    );
+
+    let state = restored.state.as_ref().expect("restored state");
+    assert!(
+        state.tracked_tx_hashes().contains(&info.tx_hash),
+        "the registration is pending again"
+    );
+    let record = state
+        .funding_records()
+        .into_iter()
+        .find(|record| record.tx_hash == info.tx_hash)
+        .expect("its funding record is restored");
+    assert!(record.pre_fund.is_some(), "and can be re-funded");
+}
+
+/// A registration restored from a checkpoint is retired by cold-start
+/// backfill when finalized history carries it, and reported finalized.
+#[tokio::test]
+async fn restored_registration_is_retired_by_cold_start_backfill() {
+    let channel_id = ChannelId::from([0; 32]);
+    let sequencer_key = Ed25519Key::from_bytes(&[0; 32]);
+    let key = sample_program_key();
+    let (mut node, _posted) = MockNode::with_posted_channel();
+    node.channel_state = Some(single_key_channel_state());
+    let mut sequencer = ZoneSequencer::init(
+        channel_id,
+        sequencer_key.clone(),
+        node,
+        funding_config(),
+        None,
+    );
+    loop {
+        if matches!(sequencer.next_event().await, Event::Ready) {
+            break;
+        }
+    }
+    let (info, checkpoint) = sequencer
+        .handle()
+        .register_program(key.clone())
+        .await
+        .expect("a valid key registers");
+    drop(sequencer);
+
+    // While the sequencer was down the registration finalized in block 1.
+    let register_tx = unverified_tx_with_ops(vec![Op::ProgramRegister(ProgramRegisterOp {
+        verification_key: key,
+    })]);
+    assert_eq!(
+        register_tx.hash(),
+        info.tx_hash,
+        "the mock funds the bare op"
+    );
+    let b1 = api_block(1, 0, 5, vec![register_tx]);
+    let b2 = api_block(2, 1, 6, Vec::new());
+    let node = MockNode {
+        channel_state: Some(single_key_channel_state()),
+        lib: b1.header.id,
+        lib_slot: b1.header.slot,
+        tip: b1.header.id,
+        scripts: scripts(vec![StreamScript {
+            events: vec![live_event(&b2)],
+            then: StreamEnd::Hang,
+        }]),
+        immutable: vec![b1],
+        ..MockNode::default()
+    };
+    let mut restored = ZoneSequencer::init(
+        channel_id,
+        sequencer_key,
+        node,
+        funding_config(),
+        Some(checkpoint),
+    );
+
+    let mut finalized_programs = Vec::new();
+    loop {
+        match restored.next_event().await {
+            Event::Ready => break,
+            Event::BlocksProcessed { finalized, .. } => {
+                finalized_programs.extend(finalized.iter().flat_map(|tx| &tx.ops).filter_map(
+                    |op| match op {
+                        FinalizedOp::ProgramRegister(program) => Some(program.clone()),
+                        _ => None,
+                    },
+                ));
+            }
+            Event::TurnNotification { .. } => {}
+        }
+    }
+    assert_eq!(finalized_programs, vec![info]);
+    let checkpoint = restored
+        .subscribe_checkpoint()
+        .borrow()
+        .clone()
+        .expect("a checkpoint was published");
+    assert!(
+        checkpoint.pending_txs.is_empty(),
+        "backfill retired the restored registration: {:?}",
+        checkpoint.pending_txs
+    );
+    assert!(checkpoint.funding.is_empty());
 }

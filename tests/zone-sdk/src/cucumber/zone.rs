@@ -5,10 +5,14 @@ use std::{
 
 use lb_core::{
     mantle::{
-        Utxo, Value,
-        ops::channel::{
-            ChannelId, MsgId, deposit::DepositOp, inscribe::Inscription,
-            withdraw::ChannelWithdrawOp,
+        Note,
+        notes::NoteCommitment,
+        ops::{
+            StepProof,
+            channel::{
+                ChannelId, MsgId,
+                inscribe::{Inscription, Step},
+            },
         },
     },
     proofs::channel_multi_sig_proof::IndexedSignatures,
@@ -19,9 +23,17 @@ use reqwest::Url;
 use tokio::task::JoinHandle;
 
 use super::steps::zone::runner::{
-    Event, IndexedSignature, InscriptionId, PreparedChannelConfig, SequencerCheckpoint,
-    SequencerClient,
+    Event, IndexedSignature, InscriptionId, PreparedChannelConfig, ProgramRegisterInfo,
+    SequencerCheckpoint, SequencerClient,
 };
+
+/// A program a sequencer registered: the registration and the seed of the
+/// toy circuit whose key it registered, which proves its steps.
+#[derive(Debug, Clone)]
+pub struct ZoneProgram {
+    pub info: ProgramRegisterInfo,
+    pub circuit_seed: u64,
+}
 
 pub struct ZonePublishedMessage {
     pub payload: Inscription,
@@ -87,18 +99,19 @@ pub struct ZoneState {
     view_violations: HashMap<String, Vec<ZoneViewViolation>>,
     default_sequencer_alias: Option<String>,
     published_messages: HashMap<String, ZonePublishedMessage>,
-    submitted_deposits: HashMap<String, (DepositOp, Value)>,
-    /// The channel notes each deposit re-created, keyed by deposit alias — so a
-    /// later channel split transfer can spend them without waiting on the
-    /// indexer.
-    deposit_channel_notes: HashMap<String, Vec<Utxo>>,
-    submitted_withdraws: HashMap<String, ChannelWithdrawOp>,
     account_balances: HashMap<String, i64>,
     published_order: Vec<String>,
     saved_checkpoints: HashMap<String, SequencerCheckpoint>,
     latest_checkpoints: HashMap<String, SequencerCheckpoint>,
     prepared_configs: HashMap<String, PreparedChannelConfig>,
     prepared_config_signatures: HashMap<String, IndexedSignatures>,
+    programs: HashMap<String, ZoneProgram>,
+    /// The notes the program step of a published zone block created.
+    program_outputs: HashMap<String, Vec<NoteCommitment>>,
+    /// Channel notes a holder knows the opening of: deposits and payouts.
+    channel_notes: HashMap<String, Note>,
+    /// Steps a user's node built and proved, for a zone block to carry.
+    user_steps: HashMap<String, (Step, StepProof)>,
     sequencer_startups: HashMap<String, ZoneSequencerStartup>,
     sorted_total_payloads: Option<usize>,
     sorted_expected_by_sequencer: Option<HashMap<String, Vec<Inscription>>>,
@@ -266,58 +279,6 @@ impl ZoneState {
         }
     }
 
-    pub fn remember_submitted_deposit(&mut self, alias: String, deposit: DepositOp, amount: Value) {
-        self.submitted_deposits.insert(alias, (deposit, amount));
-    }
-
-    pub fn remember_deposit_channel_notes(&mut self, alias: String, channel_notes: Vec<Utxo>) {
-        self.deposit_channel_notes.insert(alias, channel_notes);
-    }
-
-    pub fn resolve_deposit_channel_notes(
-        &self,
-        alias: impl AsRef<str>,
-    ) -> Result<&[Utxo], StepError> {
-        let alias = alias.as_ref();
-
-        self.deposit_channel_notes
-            .get(alias)
-            .map(Vec::as_slice)
-            .ok_or(StepError::LogicalError {
-                message: format!("Zone deposit channel notes for alias '{alias}' not found"),
-            })
-    }
-
-    pub fn resolve_submitted_deposit(
-        &self,
-        alias: impl AsRef<str>,
-    ) -> Result<&(DepositOp, Value), StepError> {
-        let alias = alias.as_ref();
-
-        self.submitted_deposits
-            .get(alias)
-            .ok_or(StepError::LogicalError {
-                message: format!("Zone deposit alias '{alias}' not found"),
-            })
-    }
-
-    pub fn remember_submitted_withdraw(&mut self, alias: String, withdraw: ChannelWithdrawOp) {
-        self.submitted_withdraws.insert(alias, withdraw);
-    }
-
-    pub fn resolve_submitted_withdraw(
-        &self,
-        alias: impl AsRef<str>,
-    ) -> Result<&ChannelWithdrawOp, StepError> {
-        let alias = alias.as_ref();
-
-        self.submitted_withdraws
-            .get(alias)
-            .ok_or(StepError::LogicalError {
-                message: format!("Zone withdraw alias '{alias}' not found"),
-            })
-    }
-
     pub fn set_zone_account_balances(&mut self, balances: HashMap<String, i64>) {
         self.account_balances = balances;
     }
@@ -407,6 +368,55 @@ impl ZoneState {
 
     pub fn remember_prepared_config(&mut self, alias: String, prepared: PreparedChannelConfig) {
         self.prepared_configs.insert(alias, prepared);
+    }
+
+    pub fn remember_program(&mut self, alias: String, program: ZoneProgram) {
+        self.programs.insert(alias, program);
+    }
+
+    pub fn program(&self, alias: &str) -> Result<&ZoneProgram, StepError> {
+        self.programs.get(alias).ok_or(StepError::LogicalError {
+            message: format!("Zone program '{alias}' not found"),
+        })
+    }
+
+    pub fn remember_program_outputs(&mut self, block_alias: String, outputs: Vec<NoteCommitment>) {
+        self.program_outputs.insert(block_alias, outputs);
+    }
+
+    pub fn program_outputs(&self, block_alias: &str) -> Result<&[NoteCommitment], StepError> {
+        self.program_outputs
+            .get(block_alias)
+            .map(Vec::as_slice)
+            .ok_or(StepError::LogicalError {
+                message: format!("Zone block '{block_alias}' published no program step"),
+            })
+    }
+
+    pub fn remember_channel_note(&mut self, alias: String, note: Note) {
+        self.channel_notes.insert(alias, note);
+    }
+
+    pub fn channel_note(&self, alias: &str) -> Result<Note, StepError> {
+        self.channel_notes
+            .get(alias)
+            .copied()
+            .ok_or(StepError::LogicalError {
+                message: format!("Channel note '{alias}' not found"),
+            })
+    }
+
+    pub fn remember_user_step(&mut self, alias: String, step: Step, proof: StepProof) {
+        self.user_steps.insert(alias, (step, proof));
+    }
+
+    pub fn user_step(&self, alias: &str) -> Result<(Step, StepProof), StepError> {
+        self.user_steps
+            .get(alias)
+            .cloned()
+            .ok_or(StepError::LogicalError {
+                message: format!("User step '{alias}' not found"),
+            })
     }
 
     pub fn prepared_config(&self, alias: &str) -> Result<&PreparedChannelConfig, StepError> {
@@ -679,12 +689,10 @@ impl ZoneState {
         let sequencers = self.sequencers.len();
         let running = self.runtimes.len();
         let published = self.published_messages.len();
-        let deposits = self.submitted_deposits.len();
-        let withdraws = self.submitted_withdraws.len();
         let checkpoints = self.saved_checkpoints.len();
 
         format!(
-            "node={node_name}, sequencers={sequencers}, running={running}, published={published}, deposits={deposits}, withdraws={withdraws}, checkpoints={checkpoints}"
+            "node={node_name}, sequencers={sequencers}, running={running}, published={published}, checkpoints={checkpoints}"
         )
     }
 
@@ -705,14 +713,15 @@ impl ZoneState {
 
         self.sequencers.clear();
         self.published_messages.clear();
-        self.submitted_deposits.clear();
-        self.deposit_channel_notes.clear();
-        self.submitted_withdraws.clear();
         self.account_balances.clear();
         self.published_order.clear();
         self.saved_checkpoints.clear();
         self.latest_checkpoints.clear();
         self.prepared_configs.clear();
+        self.programs.clear();
+        self.program_outputs.clear();
+        self.channel_notes.clear();
+        self.user_steps.clear();
         self.prepared_config_signatures.clear();
         self.expected_custom_payloads.clear();
         self.view_violations.clear();

@@ -3,16 +3,18 @@ use std::num::NonZero;
 use lb_core::{
     mantle::{
         SignedOps, TxHash,
-        channel::{ChannelState, SlotTimeframe, SlotTimeout},
+        channel::{SlotTimeframe, SlotTimeout},
         ledger::verification_mode::StandardMode,
         ops::{
-            Op, OpProof, OpRef,
+            ChannelInscribeProof, NoOpProof, Op, OpProof, OpRef, StepProof,
             channel::{
                 ChannelId, ChannelKeyIndex, MsgId, VerifiedChannelKeys,
                 config::ChannelConfigOp,
-                inscribe::{Inscription, InscriptionOp},
+                inscribe::{Inscription, InscriptionOp, MiniBlocks, Step},
             },
+            program::ProgramRegisterOp,
         },
+        programs::ProgramVerificationKey,
         traits::{Hashable as _, MantleTx},
         transactions::{MantleTxBuilder, OpProofs, Ops, states::Unverified},
     },
@@ -108,92 +110,6 @@ pub(super) fn attach_transfer_proof(
     Ok(channel_proofs)
 }
 
-/// Build per-op proofs for an atomic channel bundle: transfer/withdraw ops all
-/// share `channel_proof`, the inscription carries `inscribe_sig`, and the fee
-/// transfer (when funded) carries `transfer_proof`.
-pub(super) fn assemble_atomic_bundle_ops_proofs(
-    tx: &impl MantleTx,
-    inscribe_sig: Ed25519Signature,
-    channel_proof: &ChannelMultiSigProof,
-    transfer_proof: Option<&OpProof>,
-) -> Result<OpProofs, Error> {
-    let mut ops_proofs = OpProofs::empty();
-    for op in tx.op_refs() {
-        match op {
-            OpRef::ChannelTransfer(_) | OpRef::ChannelWithdraw(_) => {
-                ops_proofs
-                    .try_push(OpProof::ChannelMultiSigProof(channel_proof.clone()))
-                    .map_err(|e| Error::Network(format!("too many operation proofs: {e:?}")))?;
-            }
-            OpRef::ChannelInscribe(_) => ops_proofs
-                .try_push(OpProof::Ed25519Sig(inscribe_sig))
-                .map_err(|e| Error::Network(format!("too many operation proofs: {e:?}")))?,
-            OpRef::Transfer(_) => match transfer_proof {
-                Some(proof) => ops_proofs
-                    .try_push(proof.clone())
-                    .map_err(|e| Error::Network(format!("too many operation proofs: {e:?}")))?,
-                None => {
-                    return Err(Error::Network(
-                        "funded transaction carries a fee transfer but no transfer proof".into(),
-                    ));
-                }
-            },
-            _ => {
-                return Err(Error::Network(format!(
-                    "unexpected op in atomic channel bundle: {op:?}"
-                )));
-            }
-        }
-    }
-    Ok(ops_proofs)
-}
-
-/// Assemble a fully-signed atomic bundle. `signatures` must be indexed against
-/// the channel's `accredited_keys`, exactly `transfer_threshold` of them.
-/// Count, index range and signature validity need the live channel state and
-/// are checked upstream by [`validate_multi_sig`].
-pub(super) fn assemble_atomic_bundle_tx(
-    tx: Ops,
-    inscribe_sig: Ed25519Signature,
-    signatures: IndexedSignatures,
-    transfer_proof: Option<&OpProof>,
-) -> Result<SignedOps<Unverified, StandardMode>, Error> {
-    let channel_proof = ChannelMultiSigProof::new(signatures);
-    let ops_proofs =
-        assemble_atomic_bundle_ops_proofs(&tx, inscribe_sig, &channel_proof, transfer_proof)?;
-    SignedOps::from_parts(tx, ops_proofs)
-        .map_err(|error| Error::Network(format!("failed to assemble atomic bundle tx: {error:?}")))
-}
-
-/// Every way a prepared bundle has gone stale since prepare, as human-readable
-/// reasons (empty when it can still land as built): the channel config moved
-/// (keys/threshold the signatures were collected under), or the inscription
-/// parent is no longer the one prepare would pick now.
-pub(super) fn stale_bundle_reasons(
-    prepared_keys: &[UnverifiedEd25519PublicKey],
-    prepared_threshold: ChannelKeyIndex,
-    live_keys: &[UnverifiedEd25519PublicKey],
-    live_threshold: ChannelKeyIndex,
-    prepared_parent: MsgId,
-    live_parent: MsgId,
-) -> Vec<String> {
-    let mut reasons = Vec::new();
-    if prepared_threshold != live_threshold {
-        reasons.push(format!(
-            "transfer_threshold changed {prepared_threshold} -> {live_threshold}"
-        ));
-    }
-    if prepared_keys != live_keys {
-        reasons.push(format!(
-            "accredited keys changed ({} -> {} keys)",
-            prepared_keys.len(),
-            live_keys.len()
-        ));
-    }
-    reasons.extend(stale_parent_reason(prepared_parent, live_parent));
-    reasons
-}
-
 /// Why a tx chained on `prepared_parent` can no longer land, if the publish
 /// tip has moved on to `live_parent` since it was built; `None` while they
 /// agree.
@@ -220,7 +136,7 @@ pub(super) fn validate_multi_sig(
     let mut problems = Vec::new();
     if signatures.len() != usize::from(threshold) {
         problems.push(format!(
-            "signature count {} does not match transfer_threshold {threshold}",
+            "signature count {} does not match threshold {threshold}",
             signatures.len()
         ));
     }
@@ -267,85 +183,121 @@ pub fn sign_prepared(
     ))
 }
 
-/// Find the position of the SDK's public key in the channel's `accredited_keys`
-/// list. Returns an error if our key is not on the accredited list (we can't
-/// sign for this channel).
-pub(super) fn find_own_key_index(
-    channel_state: &ChannelState,
+pub(super) fn inscription_op(
+    channel_id: ChannelId,
     signing_key: &Ed25519Key,
-) -> Result<ChannelKeyIndex, Error> {
-    let own_pk = signing_key.public_key().into_unverified();
-    channel_state
-        .accredited_keys
-        .iter()
-        .position(|k| *k == own_pk)
-        .map(|i| i as ChannelKeyIndex)
-        .ok_or_else(|| Error::Network("sequencer key not in channel accredited_keys".into()))
+    inscription: Inscription,
+    parent: MsgId,
+    mini_blocks: MiniBlocks,
+) -> InscriptionOp {
+    InscriptionOp {
+        channel_id,
+        inscription,
+        parent,
+        signer: signing_key.public_key().into_unverified(),
+        mini_blocks,
+    }
+}
+
+/// Check that `step_proofs` holds one proof per step of `op`, of its kind.
+pub(super) fn check_step_proofs(
+    op: &InscriptionOp,
+    step_proofs: &[StepProof],
+) -> Result<(), Error> {
+    if op.steps_len() != step_proofs.len() {
+        return Err(Error::InvalidStepProofs(format!(
+            "{} proofs for {} steps",
+            step_proofs.len(),
+            op.steps_len()
+        )));
+    }
+    for (index, (step, proof)) in op.steps().zip(step_proofs).enumerate() {
+        let matches = match step {
+            Step::User(_) | Step::ProgramDeposit(_) => matches!(proof, StepProof::ZkTransfer(_)),
+            Step::Program(_) => matches!(proof, StepProof::ProgramStep(_)),
+        };
+        if !matches {
+            return Err(Error::InvalidStepProofs(format!(
+                "the proof of step {index} is not of the kind its step takes"
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub(super) async fn create_inscribe_tx<Node>(
     node: &Node,
     funding: &FundingConfig,
-    channel_id: ChannelId,
     signing_key: &Ed25519Key,
-    inscription: Inscription,
-    parent: MsgId,
-) -> Result<(SignedOps<Unverified, StandardMode>, MsgId, MantleTxBuilder), Error>
+    inscribe_op: InscriptionOp,
+    step_proofs: Vec<StepProof>,
+) -> Result<(SignedOps<Unverified, StandardMode>, MantleTxBuilder), Error>
 where
     Node: adapter::Node + Sync,
 {
-    let signer = signing_key.public_key().into_unverified();
-
-    let inscribe_op = InscriptionOp {
-        channel_id,
-        inscription,
-        parent,
-        signer,
-    };
-    let msg_id = inscribe_op.id();
-
     let (inscribe_tx, transfer_proof, pre_fund) =
         fund_ops(node, funding, vec![Op::ChannelInscribe(inscribe_op)]).await?;
-
-    let tx_hash = inscribe_tx.hash();
-    let signature = sign_tx(tx_hash, signing_key);
-    let ops_proofs = attach_transfer_proof(
-        &inscribe_tx,
-        [OpProof::Ed25519Sig(signature)].into(),
-        transfer_proof,
-    )?;
-
-    let signed_tx = SignedOps::from_parts(inscribe_tx, ops_proofs)
-        .unwrap_or_else(|error| panic!("Node returned an unprovable transaction: {error}"));
-
-    Ok((signed_tx, msg_id, pre_fund))
+    let signed_tx = sign_own_tx(inscribe_tx, transfer_proof, signing_key, step_proofs)?;
+    Ok((signed_tx, pre_fund))
 }
 
-/// Sign a funded tx this sequencer built itself. A plain inscription carries
-/// the sequencer's `Ed25519Sig`; with `own_key_index` set, a bundle's
-/// transfer and withdraw ops carry its single-signer multi-sig proof too.
+/// Sign a funded inscription tx this sequencer built itself.
 pub(super) fn sign_own_tx(
     tx: Ops,
     transfer_proof: Option<OpProof>,
     signing_key: &Ed25519Key,
-    own_key_index: Option<ChannelKeyIndex>,
+    step_proofs: Vec<StepProof>,
 ) -> Result<SignedOps<Unverified, StandardMode>, Error> {
     let own_sig = sign_tx(tx.hash(), signing_key);
-    let ops_proofs = match own_key_index {
-        Some(index) => {
-            let channel_proof =
-                ChannelMultiSigProof::new(IndexedSignatures::from((index, own_sig)));
-            assemble_atomic_bundle_ops_proofs(
-                &tx,
-                own_sig,
-                &channel_proof,
-                transfer_proof.as_ref(),
-            )?
-        }
-        None => attach_transfer_proof(&tx, [OpProof::Ed25519Sig(own_sig)].into(), transfer_proof)?,
-    };
+    let ops_proofs = attach_transfer_proof(
+        &tx,
+        [inscribe_proof(own_sig, step_proofs)].into(),
+        transfer_proof,
+    )?;
     SignedOps::from_parts(tx, ops_proofs)
         .map_err(|error| Error::Network(format!("failed to assemble signed tx: {error:?}")))
+}
+
+/// Reject a key the ledger would refuse at block assembly: every point of a
+/// registered key is on its curve and in its subgroup.
+pub(super) fn validate_program_key(key: &ProgramVerificationKey) -> Result<(), Error> {
+    key.to_groth16()
+        .map(drop)
+        .map_err(|error| Error::InvalidProgramKey(error.to_string()))
+}
+
+/// Build and fund a `ProgramRegister` transaction. Returns the signed tx and
+/// the pre-funding builder, so a stale one can be re-funded.
+pub(super) async fn create_program_register_tx<Node>(
+    node: &Node,
+    funding: &FundingConfig,
+    verification_key: ProgramVerificationKey,
+) -> Result<(SignedOps<Unverified, StandardMode>, MantleTxBuilder), Error>
+where
+    Node: adapter::Node + Sync,
+{
+    let register = ProgramRegisterOp { verification_key };
+    let (tx, transfer_proof, pre_fund) =
+        fund_ops(node, funding, vec![Op::ProgramRegister(register)]).await?;
+    Ok((sign_register_tx(tx, transfer_proof)?, pre_fund))
+}
+
+/// Prove a funded `ProgramRegister` tx: the op takes no proof, the fee
+/// transfer the node's.
+pub(super) fn sign_register_tx(
+    tx: Ops,
+    transfer_proof: Option<OpProof>,
+) -> Result<SignedOps<Unverified, StandardMode>, Error> {
+    let ops_proofs = attach_transfer_proof(&tx, [OpProof::None(NoOpProof)].into(), transfer_proof)?;
+    SignedOps::from_parts(tx, ops_proofs)
+        .map_err(|error| Error::Network(format!("failed to assemble signed tx: {error:?}")))
+}
+
+/// Whether `tx` carries a program registration.
+pub(super) fn registers_program(tx: &impl MantleTx) -> bool {
+    tx.op_refs()
+        .into_iter()
+        .any(|op| matches!(op, OpRef::ProgramRegister(_)))
 }
 
 /// Build and fund a `ChannelConfig` transaction, returning the funded raw
@@ -369,7 +321,6 @@ pub(super) async fn build_and_fund_config<Node>(
     posting_timeframe: SlotTimeframe,
     posting_timeout: SlotTimeout,
     configuration_threshold: u16,
-    transfer_threshold: u16,
 ) -> Result<(Ops, Option<OpProof>), Error>
 where
     Node: adapter::Node + Sync,
@@ -386,7 +337,6 @@ where
         posting_timeframe,
         posting_timeout,
         non_zero(configuration_threshold, "configuration_threshold")?,
-        non_zero(transfer_threshold, "transfer_threshold")?,
     )
     .map_err(|_| {
         Error::Network(format!(
@@ -447,7 +397,6 @@ pub(super) async fn create_channel_config_tx<Node>(
     posting_timeframe: SlotTimeframe,
     posting_timeout: SlotTimeout,
     configuration_threshold: u16,
-    transfer_threshold: u16,
 ) -> Result<SignedOps<Unverified, StandardMode>, Error>
 where
     Node: adapter::Node + Sync,
@@ -461,7 +410,6 @@ where
         posting_timeframe,
         posting_timeout,
         configuration_threshold,
-        transfer_threshold,
     )
     .await?;
 
@@ -479,12 +427,13 @@ pub(super) fn prepare_tx(
     inscription: Inscription,
     parent: MsgId,
 ) -> (Ops, MsgId, Ed25519Signature) {
-    let inscription_op = InscriptionOp {
+    let inscription_op = inscription_op(
         channel_id,
+        signing_key,
         inscription,
         parent,
-        signer: signing_key.public_key().into_unverified(),
-    };
+        MiniBlocks::default(),
+    );
     let msg_id = inscription_op.id();
     // TODO: Return `Error` in case there's too many ops already.
     ops.try_push(Op::ChannelInscribe(inscription_op)).unwrap();
@@ -495,22 +444,23 @@ pub(super) fn prepare_tx(
     (ops, msg_id, inscription_sig)
 }
 
+pub(super) const fn inscribe_proof(
+    signature: Ed25519Signature,
+    step_proofs: Vec<StepProof>,
+) -> OpProof {
+    OpProof::ChannelInscribe(ChannelInscribeProof::new(signature, step_proofs))
+}
+
 pub(super) fn sign_tx(tx_hash: TxHash, signing_key: &Ed25519Key) -> Ed25519Signature {
     signing_key.sign_payload(tx_hash.as_signing_bytes())
 }
 
 #[cfg(test)]
 mod tests {
-    use lb_core::mantle::{
-        ledger::{BoundedInputs, NoteId},
-        ops::{OpProofRef, channel::withdraw::ChannelWithdrawOp},
-        transactions::TxList,
-    };
-    use lb_groth16::Fr;
     use tokio::sync::mpsc;
 
     use super::*;
-    use crate::test_support::{FORK_DIGEST, MockNode, funding_config, inscribe_op};
+    use crate::test_support::{MockNode, funding_config};
 
     #[tokio::test]
     async fn funding_path_passes_priority_fee_as_a_percentage() {
@@ -610,16 +560,10 @@ mod tests {
         let (_, accredited, sigs) = multi_sig_fixture();
         // Too few for the threshold.
         let msg = invalid_multi_sig_message(validate_multi_sig(&accredited, 3, PAYLOAD, &sigs));
-        assert!(
-            msg.contains("count 2 does not match transfer_threshold 3"),
-            "{msg}"
-        );
+        assert!(msg.contains("count 2 does not match threshold 3"), "{msg}");
         // Too many: the ledger requires exactly `threshold`, not at least.
         let msg = invalid_multi_sig_message(validate_multi_sig(&accredited, 1, PAYLOAD, &sigs));
-        assert!(
-            msg.contains("count 2 does not match transfer_threshold 1"),
-            "{msg}"
-        );
+        assert!(msg.contains("count 2 does not match threshold 1"), "{msg}");
     }
 
     #[test]
@@ -659,100 +603,8 @@ mod tests {
             IndexedSignature::new(9, keys[2].sign_payload(PAYLOAD)),
         ]);
         let msg = invalid_multi_sig_message(validate_multi_sig(&accredited, 2, PAYLOAD, &sigs));
-        assert!(
-            msg.contains("count 3 does not match transfer_threshold 2"),
-            "{msg}"
-        );
+        assert!(msg.contains("count 3 does not match threshold 2"), "{msg}");
         assert!(msg.contains("index 1 does not verify"), "{msg}");
         assert!(msg.contains("index 9 is outside"), "{msg}");
-    }
-
-    #[test]
-    fn stale_bundle_reasons_covers_config_and_parent() {
-        let (_, prepared, _) = multi_sig_fixture();
-        let parent = MsgId::root();
-
-        assert_eq!(
-            stale_bundle_reasons(&prepared, 2, &prepared, 2, parent, parent),
-            Vec::<String>::new()
-        );
-
-        // Threshold moved 2 -> 3 while signatures were being collected.
-        let reasons = stale_bundle_reasons(&prepared, 2, &prepared, 3, parent, parent);
-        assert_eq!(reasons.len(), 1);
-        assert!(reasons[0].contains("transfer_threshold changed 2 -> 3"));
-
-        // Key at index 2 rotated; same threshold.
-        let mut rotated = prepared.clone();
-        rotated[2] = Ed25519Key::from_bytes(&[9; 32])
-            .public_key()
-            .into_unverified();
-        let reasons = stale_bundle_reasons(&prepared, 2, &rotated, 2, parent, parent);
-        assert_eq!(reasons.len(), 1);
-        assert!(reasons[0].contains("accredited keys changed"));
-
-        // A peer inscribed at our parent slot: the publish tip moved.
-        let moved = MsgId::from([7u8; 32]);
-        let reasons = stale_bundle_reasons(&prepared, 2, &prepared, 2, parent, moved);
-        assert_eq!(reasons.len(), 1);
-        assert!(reasons[0].contains("no longer the publish tip"));
-
-        // Everything at once is reported together.
-        let reasons = stale_bundle_reasons(&prepared, 2, &rotated, 3, parent, moved);
-        assert_eq!(reasons.len(), 3);
-    }
-
-    /// An unfunded `[inscribe, withdraw]` bundle — the minimal op layout
-    /// `assemble_atomic_bundle_tx` has to prove.
-    fn bundle_ops() -> Ops {
-        let channel_id = ChannelId::from([0; 32]);
-        let ops = vec![
-            Op::ChannelInscribe(inscribe_op(channel_id, MsgId::root(), b"pin")),
-            Op::ChannelWithdraw(ChannelWithdrawOp {
-                channel_id,
-                inputs: BoundedInputs::from(NoteId::from(Fr::from(1u64))).into(),
-            }),
-        ];
-        TxList::try_from(ops)
-            .map(|ops| Ops::new(FORK_DIGEST, ops))
-            .expect("ops fit")
-    }
-
-    #[test]
-    fn assemble_atomic_bundle_tx_places_a_valid_2_of_3_proof() {
-        let (keys, accredited, _) = multi_sig_fixture();
-        let ops = bundle_ops();
-        let payload = ops_signing_bytes(&ops);
-        // Signers 0 and 2 of 3 sign the bundle's own hash.
-        let sigs = indexed([
-            sign_prepared(&keys[0], &accredited, &payload).unwrap(),
-            sign_prepared(&keys[2], &accredited, &payload).unwrap(),
-        ]);
-        let inscribe_sig = sign_tx(ops.hash(), &keys[0]);
-
-        let signed = assemble_atomic_bundle_tx(ops, inscribe_sig, sigs.clone(), None)
-            .expect("2-of-3 assembles");
-
-        // Hash is over the ops only, so proof attachment leaves it intact.
-        assert_eq!(signed.hash(), bundle_ops().hash());
-        let proofs: Vec<_> = signed.op_proof_refs_iter().collect();
-        assert_eq!(proofs.len(), 2, "one proof per op");
-        assert!(
-            matches!(proofs[0], OpProofRef::Ed25519Sig(sig) if *sig == inscribe_sig),
-            "inscription carries the preparer's signature"
-        );
-        let OpProofRef::ChannelMultiSigProof(proof) = proofs[1] else {
-            panic!("withdraw carries the multi-sig proof, got {:?}", proofs[1]);
-        };
-        assert_eq!(proof.signatures(), &sigs);
-        for (index, sig) in proof.signatures() {
-            accredited[usize::from(*index)]
-                .verify(&payload, sig)
-                .expect("each indexed signature verifies against its key");
-        }
-    }
-
-    fn ops_signing_bytes(ops: &Ops) -> Vec<u8> {
-        ops.hash().as_signing_bytes().to_vec()
     }
 }

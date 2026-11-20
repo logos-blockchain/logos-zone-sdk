@@ -1,7 +1,7 @@
 //! The unfinalized L1 window as the channel sees it: every block above LIB
-//! with its parent link, its cumulative safe set, note set and channel
-//! lineage, and its classified channel content, plus the finalized tips and
-//! note set the branch reads fall back to.
+//! with its parent link, its cumulative safe set and channel lineage, and its
+//! classified channel content, plus the finalized tips the branch reads fall
+//! back to.
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
@@ -12,30 +12,24 @@ use lb_core::{
     header::HeaderId,
     mantle::{
         SignedOps,
-        ledger::{NoteId, verification_mode::StandardMode},
+        ledger::verification_mode::StandardMode,
         ops::channel::MsgId,
         transactions::{hash::TxHash, states::Unverified},
     },
 };
-use rpds::{HashTrieMapSync, HashTrieSetSync, ListSync};
+use lb_mmr::PushWithPathsError;
+use lb_wallet::SPEND_ROOT_DEPTH;
+use rpds::{HashTrieSetSync, ListSync};
 
-use super::types::{
-    AtomicWithdrawInfo, ChannelNote, ChannelWalletView, DepositInfo, InscriptionInfo,
-    PinDepositInfo,
+use super::{
+    program_notes::{BlockNoteSet, ProgramNoteSet},
+    types::{InscriptionInfo, ObservedOp, ProgramNotesCheckpoint, ProgramNotesView},
 };
 
-type NoteSet = HashTrieMapSync<NoteId, ChannelNote>;
 pub type SafeSet = HashTrieSetSync<TxHash>;
 /// A channel tx's bytes, owned once and shared between the block store, the
 /// pending set and the lineage.
 pub type SharedTx = Arc<SignedOps<Unverified, StandardMode>>;
-
-/// One channel-note mutation, in on-chain execution order.
-#[derive(Debug, Clone)]
-pub(super) enum NoteOp {
-    Add(ChannelNote),
-    Remove(NoteId),
-}
 
 /// One block's cumulative state, built from its parent's plus the block's
 /// own content.
@@ -43,12 +37,13 @@ pub(super) enum NoteOp {
 struct BlockState {
     /// Tx hashes mined on the branch through this block.
     safe_set: SafeSet,
-    /// Channel notes alive at this block.
-    notes: NoteSet,
     /// The channel lineage on the branch through this block.
     lineage: Lineage,
-    /// Channel deposits mined in this block, in op order.
-    deposits: Vec<DepositInfo>,
+    /// Channel deposits and program registrations mined in this block, in
+    /// op order.
+    observed: Vec<ObservedOp>,
+    /// The channel's note set on the branch through this block.
+    notes: ProgramNoteSet,
 }
 
 /// A message-lineage position: an entry's id and its lineage-parent.
@@ -137,10 +132,8 @@ struct Finalized {
     /// `TxState::shed_stale_pending_configs` so a pending config chaining on
     /// the finalized config tip is not falsely orphaned.
     config: MsgId,
-    /// The note set at the LIB block. Splits a branch's notes into finalized
-    /// and unfinalized, seeds a parentless block and is exported for
-    /// checkpointing.
-    notes: NoteSet,
+    /// The channel's note set at LIB.
+    notes: ProgramNoteSet,
 }
 
 #[derive(Debug)]
@@ -173,11 +166,6 @@ pub struct BlockChannelTx {
 pub enum ChannelTxKind {
     /// `publish` shape: a single inscription.
     Inscription(InscriptionInfo),
-    /// `publish_atomic_withdraw` shape: an inscription + its withdraws.
-    AtomicWithdraw(AtomicWithdrawInfo),
-    /// `publish_pin_deposit` shape: an inscription + a transfer
-    /// consuming an observed deposited note.
-    PinDeposit(PinDepositInfo),
     /// A pure `channel_config` tx: a single config on the config lineage
     /// (`this_msg` = config id, `parent_msg` = config parent), which does not
     /// advance the message tip.
@@ -204,8 +192,6 @@ impl BlockChannelTx {
     pub fn infos(&self) -> &[InscriptionInfo] {
         match &self.kind {
             ChannelTxKind::Inscription(i) => std::slice::from_ref(i),
-            ChannelTxKind::AtomicWithdraw(a) => std::slice::from_ref(&a.inscription),
-            ChannelTxKind::PinDeposit(a) => std::slice::from_ref(&a.inscription),
             ChannelTxKind::Config(_) => &[],
             ChannelTxKind::Custom {
                 message_entries, ..
@@ -215,15 +201,12 @@ impl BlockChannelTx {
 
     /// The `ChannelConfig` entries this tx carries, in op order. These are on
     /// the config lineage (`this_msg` = config id, `parent_msg` = config
-    /// parent) and do not advance the message tip. The clean
-    /// `Inscription`/`AtomicWithdraw` shapes carry none; a pure config is a
-    /// [`ChannelTxKind::Config`]; mixed/unknown configs ride in
-    /// [`ChannelTxKind::Custom`].
+    /// parent) and do not advance the message tip. The clean `Inscription`
+    /// shape carries none; a pure config is a [`ChannelTxKind::Config`];
+    /// mixed/unknown configs ride in [`ChannelTxKind::Custom`].
     pub fn config_entries(&self) -> &[InscriptionInfo] {
         match &self.kind {
-            ChannelTxKind::Inscription(_)
-            | ChannelTxKind::AtomicWithdraw(_)
-            | ChannelTxKind::PinDeposit(_) => &[],
+            ChannelTxKind::Inscription(_) => &[],
             ChannelTxKind::Config(c) => std::slice::from_ref(c),
             ChannelTxKind::Custom { config_entries, .. } => config_entries,
         }
@@ -249,7 +232,7 @@ impl BlockStates {
                 msg: finalized_msg,
                 parent_msg: None,
                 config: MsgId::root(),
-                notes: NoteSet::new_sync(),
+                notes: ProgramNoteSet::default(),
             },
         }
     }
@@ -303,61 +286,62 @@ impl BlockStates {
     }
 
     /// Record `block_id` under `parent_id` with its classified channel txs;
-    /// `our_txs` are the hashes that become safe at this block and
-    /// `note_ops` the channel-note changes it applies, in execution order.
+    /// `our_txs` are the hashes that become safe at this block, `note_set`
+    /// what it does to the channel's note set. Fails, recording nothing,
+    /// when that update cannot be applied: the tracked set would no longer
+    /// match the ledger's.
     pub fn insert(
         &mut self,
         block_id: HeaderId,
         parent_id: HeaderId,
         our_txs: impl IntoIterator<Item = TxHash>,
         channel_txs: Vec<BlockChannelTx>,
-        note_ops: Vec<NoteOp>,
-        deposits: Vec<DepositInfo>,
-    ) {
-        // Store parent relationship for pruning
-        self.parent_map.insert(block_id, parent_id);
-
+        observed: Vec<ObservedOp>,
+        note_set: Option<BlockNoteSet>,
+    ) -> Result<(), PushWithPathsError> {
         // Build cumulative state from the parent. Parent may be missing
         // when blocks are processed from slot-range backfill and LIB has
         // advanced between batches (pruning the parent). Starting the safe
         // set empty is conservative: txs show as "pending" until seen in a
-        // subsequent block with a known parent. Notes start from the
-        // finalized set, the most complete set known below the block.
+        // subsequent block with a known parent.
         //
         // Every channel-tip-touching tx joins the set, tracked or not: a fork
         // block is not mirrored on arrival, and its txs must read as mined
         // once the branch turns canonical and the store re-mirrors them.
         let parent = self.block_states.get(&parent_id);
+        // A block whose parent is unknown continues the finalized set, the
+        // nearest branch state there is.
+        let parent_notes = parent.map_or_else(|| self.finalized.notes.clone(), |p| p.notes.clone());
+        let notes = match note_set {
+            Some(block) => parent_notes.apply(&block)?,
+            None => parent_notes,
+        };
         let mut safe_set = parent.map(|p| p.safe_set.clone()).unwrap_or_default();
-        let mut notes = parent.map_or_else(|| self.finalized.notes.clone(), |p| p.notes.clone());
         let channel_txs: Vec<Arc<BlockChannelTx>> = channel_txs.into_iter().map(Arc::new).collect();
         let lineage = Lineage::extend(parent.map(|p| &p.lineage), &channel_txs);
 
         for tx in our_txs {
             safe_set = safe_set.insert(tx);
         }
-        for op in note_ops {
-            notes = match op {
-                NoteOp::Add(note) => notes.insert(note.note_id, note),
-                NoteOp::Remove(id) => notes.remove(&id),
-            };
-        }
+        // Store parent relationship for pruning
+        self.parent_map.insert(block_id, parent_id);
         self.block_states.insert(
             block_id,
             BlockState {
                 safe_set,
-                notes,
                 lineage,
-                deposits,
+                observed,
+                notes,
             },
         );
 
         if !channel_txs.is_empty() {
             self.block_txs.insert(block_id, channel_txs);
         }
+        Ok(())
     }
 
-    /// Move LIB to `lib`: advance the finalized tips and note set, prune the
+    /// Move LIB to `lib`: advance the finalized tips, prune the
     /// blocks at or below the old window, drop finalized hashes from the
     /// safe sets and rebase the lineages on the new LIB block. `is_pending`
     /// marks hashes still tracked as pending, which stay in the sets.
@@ -430,32 +414,50 @@ impl BlockStates {
         }
     }
 
-    /// The channel's note set at `tip`, split into the notes also in the
+    /// The channel's program notes at `tip`, split into the ones also in the
     /// finalized set and the rest; the finalized set alone when `tip` is
     /// `None` or unknown.
-    pub fn notes_at(&self, tip: Option<HeaderId>) -> ChannelWalletView {
-        let notes = tip
-            .and_then(|tip| self.block_states.get(&tip))
-            .map_or(&self.finalized.notes, |state| &state.notes);
-        let (finalized, unfinalized): (Vec<_>, Vec<_>) = notes
-            .values()
-            .cloned()
-            .partition(|note| self.finalized.notes.contains_key(&note.note_id));
-        ChannelWalletView {
-            finalized,
-            unfinalized,
+    pub fn program_notes_at(&self, tip: Option<HeaderId>) -> ProgramNotesView {
+        tip.and_then(|tip| self.block_states.get(&tip))
+            .map_or(&self.finalized.notes, |state| &state.notes)
+            .view(&self.finalized.notes)
+    }
+
+    /// The program notes a step prepared at `tip` spends, at the root it
+    /// names: the set [`SPEND_ROOT_DEPTH`] blocks below the tip, the depth
+    /// every wallet spend names its root at, or the deepest one held on its
+    /// branch, keeping the notes still in the tip's set. The finalized set
+    /// when no tip is known.
+    pub fn program_spend_set(&self, tip: Option<HeaderId>) -> ProgramNoteSet {
+        let Some((tip, tip_state)) = tip.and_then(|tip| Some((tip, self.block_states.get(&tip)?)))
+        else {
+            return self.finalized.notes.clone();
+        };
+        let mut block = tip;
+        let mut base = tip_state;
+        for _ in 0..SPEND_ROOT_DEPTH {
+            let Some((parent, state)) = self
+                .parent_map
+                .get(&block)
+                .and_then(|parent| Some((*parent, self.block_states.get(parent)?)))
+            else {
+                break;
+            };
+            block = parent;
+            base = state;
         }
+        base.notes.still_in(&tip_state.notes)
     }
 
     /// The finalized note set, for checkpointing.
-    pub fn finalized_notes(&self) -> Vec<ChannelNote> {
-        self.finalized.notes.values().cloned().collect()
+    pub fn finalized_program_notes(&self) -> ProgramNotesCheckpoint {
+        self.finalized.notes.to_checkpoint()
     }
 
     /// Restore the finalized note set from a checkpoint; the LIB block
     /// starts from it.
-    pub fn restore_finalized_notes(&mut self, notes: Vec<ChannelNote>) {
-        let notes: NoteSet = notes.into_iter().map(|n| (n.note_id, n)).collect();
+    pub fn restore_finalized_program_notes(&mut self, checkpoint: ProgramNotesCheckpoint) {
+        let notes = ProgramNoteSet::from_checkpoint(checkpoint);
         if let Some(state) = self.block_states.get_mut(&self.current_lib) {
             state.notes = notes.clone();
         }
@@ -514,15 +516,15 @@ impl BlockStates {
         blocks
     }
 
-    /// The deposits of the blocks above LIB that `tip`'s branch holds and
-    /// `old_tip`'s did not, oldest block first: what turned canonical with
-    /// this tip move. A branch that wins the tip back reports its deposits
+    /// The observed ops of the blocks above LIB that `tip`'s branch holds
+    /// and `old_tip`'s did not, oldest block first: what turned canonical
+    /// with this tip move. A branch that wins the tip back reports its ops
     /// again, as `adopted` does its inscriptions.
-    pub fn deposits_newly_canonical(
+    pub fn observed_newly_canonical(
         &self,
         old_tip: Option<HeaderId>,
         tip: HeaderId,
-    ) -> Vec<DepositInfo> {
+    ) -> Vec<ObservedOp> {
         let old: HashSet<HeaderId> = old_tip
             .map(|old| self.branch_blocks_above_lib(old))
             .unwrap_or_default()
@@ -532,7 +534,7 @@ impl BlockStates {
             .into_iter()
             .filter(|block| !old.contains(block))
             .filter_map(|block| self.block_states.get(&block))
-            .flat_map(|state| state.deposits.iter().cloned())
+            .flat_map(|state| state.observed.iter().cloned())
             .collect()
     }
 
@@ -599,39 +601,32 @@ impl BlockStates {
 
 #[cfg(test)]
 mod tests {
-    use lb_common_http_client::Slot;
-    use lb_core::mantle::{
-        Op,
-        ops::channel::{ChannelId, inscribe::Inscription},
-        traits::Hashable as _,
+    use lb_core::{
+        crypto::ZkHasher,
+        mantle::{
+            Op,
+            notes::NoteCommitment,
+            ops::channel::{ChannelId, inscribe::Inscription},
+            traits::Hashable as _,
+        },
     };
-    use lb_groth16::Fr;
 
-    use super::*;
+    use super::{
+        super::{
+            program_notes::fixtures::{block, commitment},
+            types::ProgramNote,
+        },
+        *,
+    };
     use crate::test_support::{header_id, inscribe_op, unverified_tx_with_ops};
 
     fn process(blocks: &mut BlockStates, block: HeaderId, parent: HeaderId, lib: HeaderId) {
-        blocks.insert(block, parent, [], Vec::new(), Vec::new(), vec![]);
+        blocks
+            .insert(block, parent, [], Vec::new(), vec![], None)
+            .unwrap();
         if lib != blocks.lib() {
             blocks.advance_lib(lib, |_| false);
         }
-    }
-
-    fn note_id(seed: u64) -> NoteId {
-        NoteId::from(Fr::from(seed))
-    }
-
-    fn note(seed: u64, value: u64) -> ChannelNote {
-        ChannelNote {
-            note_id: note_id(seed),
-            value,
-            pk: Fr::from(seed).into(),
-            slot: Slot::from(1),
-        }
-    }
-
-    fn add(seed: u64, value: u64) -> NoteOp {
-        NoteOp::Add(note(seed, value))
     }
 
     fn msg_id(n: u8) -> MsgId {
@@ -647,6 +642,7 @@ mod tests {
             this_msg: msg_id(this),
             payload: Inscription::empty(),
             signer: None,
+            steps: crate::InscriptionSteps::default(),
         }
     }
 
@@ -675,10 +671,16 @@ mod tests {
         let genesis = header_id(0);
         let (a1, a2, a3, b1) = (header_id(1), header_id(2), header_id(3), header_id(10));
         let mut blocks = BlockStates::new(genesis, MsgId::root());
-        blocks.insert(a1, genesis, [], vec![inscription(0, 1)], Vec::new(), vec![]);
-        blocks.insert(a2, a1, [], vec![config(0, 11)], Vec::new(), vec![]);
-        blocks.insert(a3, a2, [], Vec::new(), Vec::new(), vec![]);
-        blocks.insert(b1, a1, [], vec![inscription(1, 2)], Vec::new(), vec![]);
+        blocks
+            .insert(a1, genesis, [], vec![inscription(0, 1)], vec![], None)
+            .unwrap();
+        blocks
+            .insert(a2, a1, [], vec![config(0, 11)], vec![], None)
+            .unwrap();
+        blocks.insert(a3, a2, [], Vec::new(), vec![], None).unwrap();
+        blocks
+            .insert(b1, a1, [], vec![inscription(1, 2)], vec![], None)
+            .unwrap();
 
         assert_eq!(blocks.channel_tip_at(a3), msg_id(1));
         assert_eq!(blocks.config_tip_at(a3), msg_id(11));
@@ -695,9 +697,15 @@ mod tests {
         let genesis = header_id(0);
         let (a1, a2, a3) = (header_id(1), header_id(2), header_id(3));
         let mut blocks = BlockStates::new(genesis, MsgId::root());
-        blocks.insert(a1, genesis, [], vec![inscription(0, 1)], Vec::new(), vec![]);
-        blocks.insert(a2, a1, [], vec![config(0, 11)], Vec::new(), vec![]);
-        blocks.insert(a3, a2, [], vec![inscription(1, 2)], Vec::new(), vec![]);
+        blocks
+            .insert(a1, genesis, [], vec![inscription(0, 1)], vec![], None)
+            .unwrap();
+        blocks
+            .insert(a2, a1, [], vec![config(0, 11)], vec![], None)
+            .unwrap();
+        blocks
+            .insert(a3, a2, [], vec![inscription(1, 2)], vec![], None)
+            .unwrap();
         blocks.advance_lib(a2, |_| false);
 
         assert_eq!(blocks.finalized_msg(), msg_id(1));
@@ -723,9 +731,15 @@ mod tests {
         let (a1, x, y) = (header_id(1), header_id(2), header_id(3));
         let unknown = header_id(99);
         let mut blocks = BlockStates::new(genesis, MsgId::root());
-        blocks.insert(a1, genesis, [], vec![inscription(0, 1)], Vec::new(), vec![]);
-        blocks.insert(x, unknown, [], vec![inscription(1, 2)], Vec::new(), vec![]);
-        blocks.insert(y, unknown, [], Vec::new(), Vec::new(), vec![]);
+        blocks
+            .insert(a1, genesis, [], vec![inscription(0, 1)], vec![], None)
+            .unwrap();
+        blocks
+            .insert(x, unknown, [], vec![inscription(1, 2)], vec![], None)
+            .unwrap();
+        blocks
+            .insert(y, unknown, [], Vec::new(), vec![], None)
+            .unwrap();
 
         assert_eq!(blocks.channel_tip_at(x), msg_id(2));
         assert_eq!(ids(blocks.infos_on_branch(x)), [msg_id(2)]);
@@ -733,38 +747,62 @@ mod tests {
         assert!(blocks.infos_on_branch(y).is_empty());
     }
 
+    fn commitments(notes: &[ProgramNote]) -> Vec<NoteCommitment> {
+        notes.iter().map(|note| note.commitment).collect()
+    }
+
+    /// LIB holds note 1. Branch A consumes it and creates 2; branch B creates
+    /// 3 and leaves 1 untouched. Each branch reads its own set, split by what
+    /// the finalized set holds.
     #[test]
-    fn notes_view_layers_the_branch_over_the_finalized_set() {
-        // LIB holds n1. Branch A spends n1 and adds n2; branch B adds n3 and
-        // leaves n1 untouched.
+    fn program_notes_view_layers_the_branch_over_the_finalized_set() {
         let genesis = header_id(0);
         let a1 = header_id(1);
         let b1 = header_id(2);
         let mut blocks = BlockStates::new(genesis, MsgId::root());
-        blocks.restore_finalized_notes(vec![note(1, 10)]);
-        blocks.insert(
-            a1,
-            genesis,
-            [],
-            Vec::new(),
-            vec![NoteOp::Remove(note_id(1)), add(2, 20)],
-            vec![],
-        );
-        blocks.insert(b1, genesis, [], Vec::new(), vec![add(3, 30)], vec![]);
+        let finalized = ProgramNoteSet::default()
+            .apply(&block(&[], &[1], &[]))
+            .unwrap();
+        blocks.restore_finalized_program_notes(finalized.to_checkpoint());
+        blocks
+            .insert(
+                a1,
+                genesis,
+                [],
+                Vec::new(),
+                vec![],
+                Some(block(&[], &[2], &[1])),
+            )
+            .unwrap();
+        blocks
+            .insert(
+                b1,
+                genesis,
+                [],
+                Vec::new(),
+                vec![],
+                Some(block(&[], &[3], &[])),
+            )
+            .unwrap();
 
-        let at_a = blocks.notes_at(Some(a1));
+        let at_a = blocks.program_notes_at(Some(a1));
         assert!(
             at_a.finalized.is_empty(),
             "finalized note spent on branch A"
         );
-        assert_eq!(at_a.unfinalized.len(), 1);
-        assert_eq!(at_a.unfinalized[0].note_id, note_id(2));
-
-        let at_b = blocks.notes_at(Some(b1));
-        assert_eq!(at_b.finalized.len(), 1);
-        assert_eq!(at_b.finalized[0].note_id, note_id(1));
-        assert_eq!(at_b.unfinalized.len(), 1);
-        assert_eq!(at_b.unfinalized[0].note_id, note_id(3));
+        assert_eq!(commitments(&at_a.unfinalized), [commitment(2)]);
+        let at_b = blocks.program_notes_at(Some(b1));
+        assert_eq!(commitments(&at_b.finalized), [commitment(1)]);
+        assert_eq!(commitments(&at_b.unfinalized), [commitment(3)]);
+        assert_ne!(at_a.root, at_b.root, "each branch has its own root");
+        for note in at_b.finalized.iter().chain(&at_b.unfinalized) {
+            assert!(note.path.verify::<ZkHasher>(note.commitment.0, at_b.root));
+        }
+        assert_eq!(
+            blocks.program_notes_at(None).root,
+            finalized.root(),
+            "no tip reads the finalized set"
+        );
     }
 
     #[test]
@@ -773,34 +811,83 @@ mod tests {
         let a1 = header_id(1);
         let a2 = header_id(2);
         let mut blocks = BlockStates::new(genesis, MsgId::root());
-        blocks.insert(a1, genesis, [], Vec::new(), vec![add(1, 10)], vec![]);
-        blocks.insert(
-            a2,
-            a1,
-            [],
-            Vec::new(),
-            vec![NoteOp::Remove(note_id(1))],
-            vec![],
-        );
-
-        let view = blocks.notes_at(Some(a2));
+        blocks
+            .insert(
+                a1,
+                genesis,
+                [],
+                Vec::new(),
+                vec![],
+                Some(block(&[], &[1], &[])),
+            )
+            .unwrap();
+        blocks
+            .insert(a2, a1, [], Vec::new(), vec![], Some(block(&[], &[], &[1])))
+            .unwrap();
+        let view = blocks.program_notes_at(Some(a2));
         assert_eq!(view.finalized, []);
         assert_eq!(view.unfinalized, []);
     }
 
+    /// Moving LIB to a block makes its set the finalized one, so the notes it
+    /// holds read as finalized on every branch above it.
     #[test]
-    fn finalized_notes_roundtrip_through_restore() {
+    fn lib_advance_folds_the_lib_block_notes_into_the_finalized_set() {
         let genesis = header_id(0);
+        let a1 = header_id(1);
+        let a2 = header_id(2);
         let mut blocks = BlockStates::new(genesis, MsgId::root());
-        blocks.restore_finalized_notes(vec![note(1, 10), note(2, 20)]);
-        let mut exported = blocks.finalized_notes();
-        exported.sort_by_key(|n| n.note_id);
+        blocks
+            .insert(
+                a1,
+                genesis,
+                [],
+                Vec::new(),
+                vec![],
+                Some(block(&[9], &[1], &[])),
+            )
+            .unwrap();
+        blocks
+            .insert(a2, a1, [], Vec::new(), vec![], Some(block(&[], &[2], &[])))
+            .unwrap();
+        assert_eq!(blocks.program_notes_at(Some(a2)).finalized, []);
 
-        let mut restored = BlockStates::new(genesis, MsgId::root());
-        restored.restore_finalized_notes(exported.clone());
-        let mut roundtripped = restored.finalized_notes();
-        roundtripped.sort_by_key(|n| n.note_id);
-        assert_eq!(exported, roundtripped);
+        blocks.advance_lib(a1, |_| false);
+
+        let at_a2 = blocks.program_notes_at(Some(a2));
+        assert_eq!(commitments(&at_a2.finalized), [commitment(1)]);
+        assert_eq!(commitments(&at_a2.unfinalized), [commitment(2)]);
+        let checkpoint = blocks.finalized_program_notes();
+        assert_eq!(commitments(&checkpoint.notes), [commitment(1)]);
+        assert_eq!(
+            checkpoint.commitments.frontier_root(),
+            blocks.program_notes_at(None).root
+        );
+    }
+
+    /// A block whose parent is unknown continues the finalized set.
+    #[test]
+    fn unknown_parent_continues_the_finalized_set() {
+        let genesis = header_id(0);
+        let orphan = header_id(5);
+        let mut blocks = BlockStates::new(genesis, MsgId::root());
+        let finalized = ProgramNoteSet::default()
+            .apply(&block(&[], &[1], &[]))
+            .unwrap();
+        blocks.restore_finalized_program_notes(finalized.to_checkpoint());
+        blocks
+            .insert(
+                orphan,
+                header_id(4),
+                [],
+                Vec::new(),
+                vec![],
+                Some(block(&[], &[2], &[])),
+            )
+            .unwrap();
+        let view = blocks.program_notes_at(Some(orphan));
+        assert_eq!(commitments(&view.finalized), [commitment(1)]);
+        assert_eq!(commitments(&view.unfinalized), [commitment(2)]);
     }
 
     #[test]

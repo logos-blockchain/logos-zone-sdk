@@ -1,0 +1,7 @@
+# The zone-sdk repository is private: fetch its pinned revision with the git
+# CLI, which has the developer's credentials. Builds land in the root target.
+[build]
+target-dir = "../target"
+
+[net]
+git-fetch-with-cli = true
