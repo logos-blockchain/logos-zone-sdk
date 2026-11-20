@@ -2702,7 +2702,9 @@ async fn prepare_program_inscription_spends_the_tracked_notes_and_submits() {
                 program_outputs: vec![],
                 outputs: vec![UserOutput {
                     public_key: payee,
+                    stake_public_key: payee,
                     value: opening.value,
+                    nonce: None,
                 }],
                 inscription: Inscription::new_unchecked(b"spend".to_vec()),
             })]],
@@ -2752,7 +2754,9 @@ async fn prepare_program_inscription_spends_the_tracked_notes_and_submits() {
                     program_outputs: vec![],
                     outputs: vec![UserOutput {
                         public_key: payee,
+                        stake_public_key: payee,
                         value: opening.value,
+                        nonce: None,
                     }],
                     inscription: Inscription::new_unchecked(b"spend".to_vec()),
                 })]],

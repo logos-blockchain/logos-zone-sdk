@@ -165,7 +165,7 @@ pub async fn pay_into_program(
         holder_public_keys: vec![holder],
     };
     let response = retry_until_spendable("program deposit", || node.channel_step(body())).await?;
-    world.zone.remember_holder_step(
+    world.zone.remember_user_step(
         step_alias,
         response.step,
         StepProof::ZkTransfer(response.proof),
@@ -175,9 +175,9 @@ pub async fn pay_into_program(
 
 /// What the program step of a zone block does.
 pub enum ProgramBlockContent {
-    /// Collects the program deposit of the holder step published before it
+    /// Collects the program deposit of the user step published before it
     /// into one note of the program.
-    Collect { holder_step: String },
+    Collect { user_step: String },
     /// Consumes every note of the program the sequencer tracks and pays
     /// their value to `wallet`, whose node imports the note before the block
     /// is submitted; the note is remembered under `payout`.
@@ -205,8 +205,8 @@ pub async fn publish_program_block(
     let channel_id = world.zone.sequencer_channel_id(sequencer_alias)?;
     let payload = Inscription::new_unchecked(block_alias.clone().into_bytes());
     let plan = match &content {
-        ProgramBlockContent::Collect { holder_step } => {
-            let (step, proof) = world.zone.holder_step(holder_step)?;
+        ProgramBlockContent::Collect { user_step } => {
+            let (step, proof) = world.zone.user_step(user_step)?;
             BlockPlan::Collect { step, proof }
         }
         ProgramBlockContent::PayOut { wallet, .. } => BlockPlan::PayOut {
@@ -350,7 +350,7 @@ pub async fn wait_for_tracked_program_notes(
 // The program step of a block, resolved from the world.
 #[expect(
     clippy::large_enum_variant,
-    reason = "a holder's step is carried with its proof as given"
+    reason = "a user's step is carried with its proof as given"
 )]
 enum BlockPlan {
     Collect {
@@ -400,11 +400,11 @@ async fn try_publish_program_block(
         BlockPlan::Collect { step, proof } => {
             let Step::ProgramDeposit(deposit) = step else {
                 return Err(StepError::LogicalError {
-                    message: "The holder step to collect is not a program deposit".to_owned(),
+                    message: "The user step to collect is not a program deposit".to_owned(),
                 });
             };
             vec![
-                StepSpec::Holder {
+                StepSpec::User {
                     step: step.clone(),
                     proof: proof.clone(),
                 },
@@ -433,7 +433,9 @@ async fn try_publish_program_block(
                 Vec::new(),
                 vec![UserOutput {
                     public_key: *payee,
+                    stake_public_key: *payee,
                     value,
+                    nonce: None,
                 }],
             ))]
         }
@@ -479,11 +481,14 @@ async fn tracked_inputs(
         .collect())
 }
 
+// A note of the program worth `value`, with a nonce of the program's choosing:
+// the collecting step consumes nothing, so the spend fixes none.
 fn program_note(program: &ZoneProgram, value: Value) -> ProgramOutput {
     ProgramOutput {
         value,
         stake_public_key: ZkPublicKey::new(Fr::from(program.circuit_seed)),
         data: Fr::from(value),
+        nonce: Some(Fr::from(program.circuit_seed ^ value)),
     }
 }
 

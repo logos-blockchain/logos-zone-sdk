@@ -45,13 +45,20 @@ pub struct ProgramOutput {
     pub value: Value,
     pub stake_public_key: ZkPublicKey,
     pub data: Fr,
+    /// The program's choice of nonce, which a step consuming nothing must
+    /// make. A step consuming a note has every output nonce derived from
+    /// its first input, so the nonce is left out or equals the derivation.
+    pub nonce: Option<Fr>,
 }
 
 /// A user note a step pays.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UserOutput {
     pub public_key: ZkPublicKey,
+    pub stake_public_key: ZkPublicKey,
     pub value: Value,
+    /// As [`ProgramOutput::nonce`].
+    pub nonce: Option<Fr>,
 }
 
 /// A program step for the sequencer to build: what it consumes and creates.
@@ -72,15 +79,15 @@ pub struct ProgramStepSpec {
     pub inscription: Inscription,
 }
 
-/// A step of a mini-block: one a holder built and proved, or one of the
-/// program for the sequencer to build.
+/// A step of a mini-block: one a user's node built and proved, a user step
+/// or a program deposit, or one of the program for the sequencer to build.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[expect(
     clippy::large_enum_variant,
-    reason = "a holder's step is carried with its proof as given"
+    reason = "a user's step is carried with its proof as given"
 )]
 pub enum StepSpec {
-    Holder { step: Step, proof: StepProof },
+    User { step: Step, proof: StepProof },
     Program(ProgramStepSpec),
 }
 
@@ -99,8 +106,8 @@ pub struct ProgramInscription {
 /// What a step of a [`ProgramInscription`] has towards its proof.
 #[derive(Debug, Clone)]
 pub enum DraftStep {
-    /// A holder's step, proven as given.
-    Holder(StepProof),
+    /// A user's step, proven as given.
+    User(StepProof),
     /// A program step built by the sequencer, whose spend
     /// [`prove_program_step`] proves and whose program proof the zone adds.
     Program(ProgramStepDraft),
@@ -128,7 +135,7 @@ impl ProgramInscription {
     pub fn program_steps(&self) -> impl Iterator<Item = &ProgramStepDraft> {
         self.steps.iter().filter_map(|step| match step {
             DraftStep::Program(draft) => Some(draft),
-            DraftStep::Holder(_) => None,
+            DraftStep::User(_) => None,
         })
     }
 
@@ -152,7 +159,7 @@ impl ProgramInscription {
             .steps
             .iter()
             .map(|step| match step {
-                DraftStep::Holder(proof) => proof.clone(),
+                DraftStep::User(proof) => proof.clone(),
                 DraftStep::Program(draft) => {
                     let (spend_proof, program_proof) = program_proofs
                         .next()
@@ -188,7 +195,6 @@ pub(super) fn build_program_inscription(
 ) -> Result<ProgramInscription, Error> {
     let mut builder = Builder {
         spend,
-        parent,
         buffer: Vec::new(),
         consumed: HashSet::new(),
         index: 0,
@@ -219,7 +225,6 @@ pub(super) fn build_program_inscription(
 // program step consumes the deposits of its mini-block since the last one.
 struct Builder<'a> {
     spend: &'a ProgramNoteSet,
-    parent: MsgId,
     buffer: Vec<NoteCommitment>,
     consumed: HashSet<NoteNullifier>,
     index: usize,
@@ -232,14 +237,14 @@ impl<'a> Builder<'a> {
         let mut deposits: Vec<ProgramDeposit> = Vec::new();
         for spec in steps {
             let step = match spec {
-                StepSpec::Holder { step, proof } => {
-                    self.check_holder(&step, &proof)?;
+                StepSpec::User { step, proof } => {
+                    self.check_user_step(&step, &proof)?;
                     match &step {
                         Step::ProgramDeposit(deposit) => deposits.push(deposit.clone()),
                         Step::Program(_) => deposits.clear(),
                         Step::User(_) => {}
                     }
-                    self.steps.push(DraftStep::Holder(proof));
+                    self.steps.push(DraftStep::User(proof));
                     step
                 }
                 StepSpec::Program(spec) => {
@@ -267,9 +272,9 @@ impl<'a> Builder<'a> {
         Error::InvalidProgramStep(format!("step {}: {reason}", self.index))
     }
 
-    // A holder's step carries the proof of its kind and consumes no note of
+    // A user's step carries the proof of its kind and consumes no note of
     // the inscription's program steps.
-    fn check_holder(&mut self, step: &Step, proof: &StepProof) -> Result<(), Error> {
+    fn check_user_step(&mut self, step: &Step, proof: &StepProof) -> Result<(), Error> {
         let fits = match step {
             Step::User(_) | Step::ProgramDeposit(_) => matches!(proof, StepProof::ZkTransfer(_)),
             Step::Program(_) => matches!(proof, StepProof::ProgramStep(_)),
@@ -311,18 +316,9 @@ impl<'a> Builder<'a> {
         let inputs = self.inputs(&spec)?;
         self.check_balance(&spec, &inputs, paid_value)?;
 
-        // A step consuming a note derives its output nonces from its first
-        // input; one consuming nothing from the publish parent and its
-        // index, through the same derivation.
-        let first_input = inputs.first().map_or_else(
-            || {
-                NoteNullifier(
-                    Fr::from_le_bytes_mod_order(self.parent.as_ref()) + Fr::from(self.index as u64),
-                )
-            },
-            |note| note.nullifier,
-        );
-        let (program_notes, outputs) = created_notes(&spec, &first_input);
+        let first_input = inputs.first().map(|note| &note.nullifier);
+        let (program_notes, outputs) =
+            created_notes(&spec, first_input).map_err(|reason| self.invalid(&reason))?;
         let input_notes: Vec<Note> = inputs
             .iter()
             .map(|note| note.opening.note(note.program))
@@ -425,35 +421,81 @@ impl<'a> Builder<'a> {
     }
 }
 
-// The notes the step creates, the program's first, each with the nonce
-// derived from `first_input` and its index among them.
+// The notes the step creates, the program's first, with the nonce the spend
+// fixes or the program chose.
 fn created_notes(
     spec: &ProgramStepSpec,
-    first_input: &NoteNullifier,
-) -> (Vec<ProgramNoteOpening>, Vec<Note>) {
+    first_input: Option<&NoteNullifier>,
+) -> Result<(Vec<ProgramNoteOpening>, Vec<Note>), String> {
     let holder = ZkKey::zero().to_public_key();
-    let program_notes: Vec<ProgramNoteOpening> = spec
+    let program_notes = spec
         .program_outputs
         .iter()
         .enumerate()
-        .map(|(index, output)| ProgramNoteOpening {
-            value: output.value,
-            nonce: derive_program_output_nonce(first_input, index, output.value, &holder),
-            stake_public_key: output.stake_public_key,
-            data: output.data,
+        .map(|(index, output)| {
+            Ok(ProgramNoteOpening {
+                value: output.value,
+                nonce: output_nonce(first_input, index, output.value, &holder, output.nonce)?,
+                stake_public_key: output.stake_public_key,
+                data: output.data,
+            })
         })
-        .collect();
-    let outputs: Vec<Note> = program_notes
+        .collect::<Result<Vec<_>, String>>()?;
+    let user_notes = spec
+        .outputs
+        .iter()
+        .enumerate()
+        .map(|(index, output)| {
+            let index = index + program_notes.len();
+            Ok(Note {
+                value: output.value,
+                nonce: output_nonce(
+                    first_input,
+                    index,
+                    output.value,
+                    &output.public_key,
+                    output.nonce,
+                )?,
+                public_key: output.public_key,
+                stake_public_key: output.stake_public_key,
+                program: Fr::ZERO,
+                data: Fr::ZERO,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let outputs = program_notes
         .iter()
         .map(|opening| opening.note(spec.program_id))
-        .chain(spec.outputs.iter().enumerate().map(|(index, output)| {
-            let index = index + program_notes.len();
-            let nonce =
-                derive_program_output_nonce(first_input, index, output.value, &output.public_key);
-            Note::new(output.value, nonce, output.public_key)
-        }))
+        .chain(user_notes)
         .collect();
-    (program_notes, outputs)
+    Ok((program_notes, outputs))
+}
+
+// The nonce of the output at `index`: the derivation from the first input
+// when the step consumes a note, which a chosen nonce must equal, else the
+// program's choice, which it must make.
+fn output_nonce(
+    first_input: Option<&NoteNullifier>,
+    index: usize,
+    value: Value,
+    public_key: &ZkPublicKey,
+    chosen: Option<Fr>,
+) -> Result<Fr, String> {
+    match (first_input, chosen) {
+        (Some(first_input), chosen) => {
+            let derived = derive_program_output_nonce(first_input, index, value, public_key);
+            if chosen.is_some_and(|nonce| nonce != derived) {
+                return Err(format!(
+                    "the nonce of output {index} is derived from the first input"
+                ));
+            }
+            Ok(derived)
+        }
+        (None, Some(nonce)) => Ok(nonce),
+        (None, None) => Err(format!(
+            "a step consuming nothing names the nonce of output {index}"
+        )),
+    }
 }
 
 // The id of the step consuming `inputs` and creating `outputs`.
@@ -558,6 +600,10 @@ mod tests {
         ZkKey::zero().to_public_key()
     }
 
+    fn chosen_nonce(value: Value) -> Fr {
+        Fr::from(1_000 + value)
+    }
+
     /// The channel's set: the program's notes 2 and 3 behind a foreign
     /// commitment.
     fn spend_set() -> ProgramNoteSet {
@@ -590,7 +636,7 @@ mod tests {
     }
 
     fn user_step() -> StepSpec {
-        StepSpec::Holder {
+        StepSpec::User {
             step: Step::User(UserStep {
                 inputs: [NoteNullifier(Fr::from(0x23u64))].into(),
                 outputs: user_outputs().into(),
@@ -603,7 +649,7 @@ mod tests {
 
     /// A deposit of `value`, spending a note of its own.
     fn deposit(program_id: ProgramId, value: Value) -> StepSpec {
-        StepSpec::Holder {
+        StepSpec::User {
             step: Step::ProgramDeposit(ProgramDeposit {
                 program_id,
                 value,
@@ -623,19 +669,23 @@ mod tests {
         StepSpec::Program(ProgramStepSpec {
             program_id: program(),
             inputs: inputs.iter().map(|seed| commitment(*seed)).collect(),
+            // A step consuming nothing names its nonces: `chosen_nonce`.
             program_outputs: program_outputs
                 .iter()
                 .map(|value| ProgramOutput {
                     value: *value,
                     stake_public_key: pk(77),
                     data: Fr::from(11u64),
+                    nonce: inputs.is_empty().then(|| chosen_nonce(*value)),
                 })
                 .collect(),
             outputs: outputs
                 .iter()
                 .map(|(seed, value)| UserOutput {
                     public_key: pk(*seed),
+                    stake_public_key: pk(*seed + 100),
                     value: *value,
+                    nonce: inputs.is_empty().then(|| chosen_nonce(*value)),
                 })
                 .collect(),
             inscription: Inscription::new_unchecked(b"program".to_vec()),
@@ -692,8 +742,8 @@ mod tests {
         assert_eq!(built.op.channel_id, channel());
         assert_eq!(built.op.parent, parent());
         assert_eq!(built.op.steps_len(), 2);
-        let Some(DraftStep::Holder(proof)) = built.steps.first() else {
-            panic!("the holder's step keeps its proof");
+        let Some(DraftStep::User(proof)) = built.steps.first() else {
+            panic!("the user's step keeps its proof");
         };
         assert_eq!(*proof, transfer_proof());
 
@@ -709,7 +759,7 @@ mod tests {
         assert_eq!(
             draft.witness.chain.tx_commitment_root,
             extended_root(&user_outputs()),
-            "the spend is proven behind the outputs of the holder's step"
+            "the spend is proven behind the outputs of the user's step"
         );
         assert_ne!(draft.witness.chain.tx_commitment_root, spend.root());
 
@@ -722,11 +772,15 @@ mod tests {
         );
         assert_eq!(
             draft.outputs[1],
-            Note::new(
-                1,
-                derive_program_output_nonce(&nullifier(2), 1, 1, &pk(5)),
-                pk(5)
-            )
+            Note {
+                value: 1,
+                nonce: derive_program_output_nonce(&nullifier(2), 1, 1, &pk(5)),
+                public_key: pk(5),
+                stake_public_key: pk(105),
+                program: Fr::ZERO,
+                data: Fr::ZERO,
+            },
+            "a user note keeps the staking key it was given"
         );
         assert_eq!(
             step.program_outputs.as_slice(),
@@ -751,8 +805,8 @@ mod tests {
     }
 
     /// A step after program deposits consumes their value, with their hash
-    /// as the second input of its program proof. Consuming no note, it
-    /// derives its nonces from the publish parent and its index.
+    /// as the second input of its program proof. Consuming no note, its
+    /// outputs carry the nonces the program chose.
     #[test]
     fn a_step_after_deposits_is_paid_their_value() {
         let built = build(
@@ -779,10 +833,10 @@ mod tests {
             .collect();
         assert_eq!(deposits.len(), 2);
         assert_eq!(draft.program_inputs[1], program_deposits_hash(&deposits));
-        let seed = NoteNullifier(Fr::from_le_bytes_mod_order(parent().as_ref()) + Fr::from(3u64));
         assert_eq!(
             draft.outputs[0].nonce,
-            derive_program_output_nonce(&seed, 0, 56, &holder())
+            chosen_nonce(56),
+            "a step consuming nothing uses the nonce the program chose"
         );
         let buffer: Vec<NoteCommitment> = user_outputs()
             .into_iter()
@@ -891,7 +945,25 @@ mod tests {
             )),
             "step 0: a ZkProgramSpend spends at most 4 notes: got 5"
         );
-        let misfit = StepSpec::Holder {
+        let mut unnamed = program_step(&[], &[5], &[]);
+        let StepSpec::Program(step) = &mut unnamed else {
+            unreachable!()
+        };
+        step.program_outputs[0].nonce = None;
+        assert_eq!(
+            rejection(build(&spend, vec![vec![deposit(program(), 5), unnamed]])),
+            "step 1: a step consuming nothing names the nonce of output 0"
+        );
+        let mut fixed = program_step(&[2], &[2], &[]);
+        let StepSpec::Program(step) = &mut fixed else {
+            unreachable!()
+        };
+        step.program_outputs[0].nonce = Some(Fr::from(9u64));
+        assert_eq!(
+            rejection(build(&spend, vec![vec![fixed]])),
+            "step 0: the nonce of output 0 is derived from the first input"
+        );
+        let misfit = StepSpec::User {
             step: Step::ProgramDeposit(ProgramDeposit::sample()),
             proof: StepProof::sample_for(StepProofShape::ProgramStep { program_notes: 0 }),
         };
@@ -901,7 +973,7 @@ mod tests {
         );
     }
 
-    /// The step proofs interleave the holders' proofs with the program
+    /// The step proofs interleave the users' proofs with the program
     /// steps' assembled ones, in step order, as `submit_prepared_inscription`
     /// checks them.
     #[test]

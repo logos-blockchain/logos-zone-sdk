@@ -118,7 +118,7 @@ async fn step_publish_collecting_block(
     step: &Step,
     sequencer_alias: String,
     block_alias: String,
-    holder_step: String,
+    user_step: String,
     program_alias: String,
 ) -> StepResult {
     publish_program_block(
@@ -127,7 +127,7 @@ async fn step_publish_collecting_block(
         &sequencer_alias,
         block_alias,
         &program_alias,
-        ProgramBlockContent::Collect { holder_step },
+        ProgramBlockContent::Collect { user_step },
     )
     .await
 }

@@ -110,8 +110,8 @@ pub struct ZoneState {
     program_outputs: HashMap<String, Vec<NoteCommitment>>,
     /// Channel notes a holder knows the opening of: deposits and payouts.
     channel_notes: HashMap<String, Note>,
-    /// Steps a holder's node built and proved, for a zone block to carry.
-    holder_steps: HashMap<String, (Step, StepProof)>,
+    /// Steps a user's node built and proved, for a zone block to carry.
+    user_steps: HashMap<String, (Step, StepProof)>,
     sequencer_startups: HashMap<String, ZoneSequencerStartup>,
     sorted_total_payloads: Option<usize>,
     sorted_expected_by_sequencer: Option<HashMap<String, Vec<Inscription>>>,
@@ -406,16 +406,16 @@ impl ZoneState {
             })
     }
 
-    pub fn remember_holder_step(&mut self, alias: String, step: Step, proof: StepProof) {
-        self.holder_steps.insert(alias, (step, proof));
+    pub fn remember_user_step(&mut self, alias: String, step: Step, proof: StepProof) {
+        self.user_steps.insert(alias, (step, proof));
     }
 
-    pub fn holder_step(&self, alias: &str) -> Result<(Step, StepProof), StepError> {
-        self.holder_steps
+    pub fn user_step(&self, alias: &str) -> Result<(Step, StepProof), StepError> {
+        self.user_steps
             .get(alias)
             .cloned()
             .ok_or(StepError::LogicalError {
-                message: format!("Holder step '{alias}' not found"),
+                message: format!("User step '{alias}' not found"),
             })
     }
 
@@ -721,7 +721,7 @@ impl ZoneState {
         self.programs.clear();
         self.program_outputs.clear();
         self.channel_notes.clear();
-        self.holder_steps.clear();
+        self.user_steps.clear();
         self.prepared_config_signatures.clear();
         self.expected_custom_payloads.clear();
         self.view_violations.clear();

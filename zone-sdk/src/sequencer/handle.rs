@@ -130,7 +130,7 @@ where
     /// and an inscription that lands then drops off the canonical branch
     /// comes back orphaned in a [`super::ChannelUpdate`] with its steps. Both
     /// mean: prepare again, re-prove the program steps against the new
-    /// `op_id`, keep the holders' proofs, submit again.
+    /// `op_id`, keep the users' proofs, submit again.
     pub async fn submit_prepared_inscription(
         &mut self,
         op: InscriptionOp,
