@@ -38,7 +38,7 @@ use super::{
     block_states::{ChannelTxKind, SharedTx},
     client::SequencerClient,
     handle::SequencerHandle,
-    program_steps::{MiniBlockSpec, ProgramInscription, build_program_inscription},
+    program_steps::{MiniBlockRequest, PreparedProgramInscription, build_program_inscription},
     slot_clock::SlotClock,
     state::{ParentTaken, TxState},
     tx_builder::{
@@ -187,8 +187,8 @@ pub(super) enum ActorRequest {
     },
     PrepareProgramInscription {
         data: Inscription,
-        mini_blocks: Vec<MiniBlockSpec>,
-        response_tx: oneshot::Sender<Result<ProgramInscription, Error>>,
+        mini_blocks: Vec<MiniBlockRequest>,
+        response_tx: oneshot::Sender<Result<PreparedProgramInscription, Error>>,
     },
     SubmitPreparedInscription {
         op: Box<InscriptionOp>,
@@ -835,8 +835,8 @@ where
     pub(super) fn do_prepare_program_inscription(
         &self,
         data: Inscription,
-        mini_blocks: Vec<MiniBlockSpec>,
-    ) -> Result<ProgramInscription, Error> {
+        mini_blocks: Vec<MiniBlockRequest>,
+    ) -> Result<PreparedProgramInscription, Error> {
         self.ensure_ready()?;
         // Safe to unwrap — `ensure_ready` checks state.
         let spend = self

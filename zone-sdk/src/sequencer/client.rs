@@ -19,7 +19,7 @@ use lb_key_management_system_service::keys::Ed25519Signature;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use super::{
-    program_steps::{MiniBlockSpec, ProgramInscription},
+    program_steps::{MiniBlockRequest, PreparedProgramInscription},
     types::{
         Error, Event, PreparedChannelConfig, ProgramNotesView, ProgramRegisterInfo,
         SequencerChannelView, SequencerCheckpoint, TurnNotification,
@@ -100,8 +100,8 @@ impl SequencerClient {
     pub async fn prepare_program_inscription(
         &self,
         data: Inscription,
-        mini_blocks: Vec<MiniBlockSpec>,
-    ) -> Result<ProgramInscription, Error> {
+        mini_blocks: Vec<MiniBlockRequest>,
+    ) -> Result<PreparedProgramInscription, Error> {
         let (response_tx, response_rx) = oneshot::channel();
         self.send(ActorRequest::PrepareProgramInscription {
             data,

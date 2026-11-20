@@ -65,7 +65,7 @@ pub struct UserOutput {
 /// Its value balances: the inputs plus the program deposits before it in
 /// its mini-block pay the outputs.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProgramStepSpec {
+pub struct ProgramStepRequest {
     pub program_id: ProgramId,
     /// The program notes it consumes, among the ones
     /// [`ZoneSequencer::program_notes`](super::ZoneSequencer::program_notes)
@@ -86,36 +86,36 @@ pub struct ProgramStepSpec {
     clippy::large_enum_variant,
     reason = "a user's step is carried with its proof as given"
 )]
-pub enum StepSpec {
+pub enum StepRequest {
     User { step: Step, proof: StepProof },
-    Program(ProgramStepSpec),
+    Program(ProgramStepRequest),
 }
 
 /// The steps of a mini-block, in the order they apply.
-pub type MiniBlockSpec = Vec<StepSpec>;
+pub type MiniBlockRequest = Vec<StepRequest>;
 
 /// An inscription with its program steps built: the op to submit, and per
 /// step what its proof is made of.
 #[derive(Debug, Clone)]
-pub struct ProgramInscription {
+pub struct PreparedProgramInscription {
     pub op: InscriptionOp,
     /// One per step of `op`, in order.
-    pub steps: Vec<DraftStep>,
+    pub steps: Vec<PreparedStep>,
 }
 
-/// What a step of a [`ProgramInscription`] has towards its proof.
+/// What a step of a [`PreparedProgramInscription`] has towards its proof.
 #[derive(Debug, Clone)]
-pub enum DraftStep {
+pub enum PreparedStep {
     /// A user's step, proven as given.
     User(StepProof),
     /// A program step built by the sequencer, whose spend
     /// [`prove_program_step`] proves and whose program proof the zone adds.
-    Program(ProgramStepDraft),
+    Program(PreparedProgramStep),
 }
 
 /// A program step the sequencer built, with the witness of its spend.
 #[derive(Debug, Clone)]
-pub struct ProgramStepDraft {
+pub struct PreparedProgramStep {
     /// The index of the step over the mini-blocks of the inscription.
     pub index: usize,
     /// The `ZkProgramSpend` witness, bound to the inscription's op id.
@@ -130,12 +130,12 @@ pub struct ProgramStepDraft {
     pub program_inputs: [Fr; 3],
 }
 
-impl ProgramInscription {
+impl PreparedProgramInscription {
     /// The program steps of the inscription, in order.
-    pub fn program_steps(&self) -> impl Iterator<Item = &ProgramStepDraft> {
+    pub fn program_steps(&self) -> impl Iterator<Item = &PreparedProgramStep> {
         self.steps.iter().filter_map(|step| match step {
-            DraftStep::Program(draft) => Some(draft),
-            DraftStep::User(_) => None,
+            PreparedStep::Program(prepared) => Some(prepared),
+            PreparedStep::User(_) => None,
         })
     }
 
@@ -159,15 +159,15 @@ impl ProgramInscription {
             .steps
             .iter()
             .map(|step| match step {
-                DraftStep::User(proof) => proof.clone(),
-                DraftStep::Program(draft) => {
+                PreparedStep::User(proof) => proof.clone(),
+                PreparedStep::Program(prepared) => {
                     let (spend_proof, program_proof) = program_proofs
                         .next()
                         .expect("one proof pair per program step, counted above");
                     StepProof::ProgramStep(ProgramStepProof {
                         spend_proof,
                         program_proof,
-                        program_notes: draft.program_notes.clone(),
+                        program_notes: prepared.program_notes.clone(),
                     })
                 }
             })
@@ -177,8 +177,8 @@ impl ProgramInscription {
 
 /// Proves the spend of a program step. Takes seconds of CPU: run it off
 /// the drive loop.
-pub fn prove_program_step(draft: &ProgramStepDraft) -> Result<ZkProgramSpendProof, Error> {
-    let (proof, _) = lb_program_spend::prove((*draft.witness).clone().into())
+pub fn prove_program_step(prepared: &PreparedProgramStep) -> Result<ZkProgramSpendProof, Error> {
+    let (proof, _) = lb_program_spend::prove((*prepared.witness).clone().into())
         .map_err(|error| Error::Prover(error.to_string()))?;
     Ok(ZkProgramSpendProof::new(proof))
 }
@@ -191,8 +191,8 @@ pub(super) fn build_program_inscription(
     data: Inscription,
     parent: MsgId,
     spend: &ProgramNoteSet,
-    mini_blocks: Vec<MiniBlockSpec>,
-) -> Result<ProgramInscription, Error> {
+    mini_blocks: Vec<MiniBlockRequest>,
+) -> Result<PreparedProgramInscription, Error> {
     let mut builder = Builder {
         spend,
         buffer: Vec::new(),
@@ -212,12 +212,12 @@ pub(super) fn build_program_inscription(
     let op_id = Fr::from_le_bytes_mod_order(&op.op_id());
     let mut steps = builder.steps;
     for step in &mut steps {
-        if let DraftStep::Program(draft) = step {
-            draft.witness.chain.msg = op_id;
-            draft.program_inputs[2] = op_id;
+        if let PreparedStep::Program(prepared) = step {
+            prepared.witness.chain.msg = op_id;
+            prepared.program_inputs[2] = op_id;
         }
     }
-    Ok(ProgramInscription { op, steps })
+    Ok(PreparedProgramInscription { op, steps })
 }
 
 // Walks the steps of an inscription as the ledger does: every step's
@@ -228,29 +228,29 @@ struct Builder<'a> {
     buffer: Vec<NoteCommitment>,
     consumed: HashSet<NoteNullifier>,
     index: usize,
-    steps: Vec<DraftStep>,
+    steps: Vec<PreparedStep>,
 }
 
 impl<'a> Builder<'a> {
-    fn mini_block(&mut self, steps: MiniBlockSpec) -> Result<MiniBlock, Error> {
+    fn mini_block(&mut self, steps: MiniBlockRequest) -> Result<MiniBlock, Error> {
         let mut built = Vec::with_capacity(steps.len());
         let mut deposits: Vec<ProgramDeposit> = Vec::new();
-        for spec in steps {
-            let step = match spec {
-                StepSpec::User { step, proof } => {
+        for request in steps {
+            let step = match request {
+                StepRequest::User { step, proof } => {
                     self.check_user_step(&step, &proof)?;
                     match &step {
                         Step::ProgramDeposit(deposit) => deposits.push(deposit.clone()),
                         Step::Program(_) => deposits.clear(),
                         Step::User(_) => {}
                     }
-                    self.steps.push(DraftStep::User(proof));
+                    self.steps.push(PreparedStep::User(proof));
                     step
                 }
-                StepSpec::Program(spec) => {
-                    let (step, draft) = self.program_step(spec, &deposits)?;
+                StepRequest::Program(request) => {
+                    let (step, prepared) = self.program_step(request, &deposits)?;
                     deposits.clear();
-                    self.steps.push(DraftStep::Program(draft));
+                    self.steps.push(PreparedStep::Program(prepared));
                     Step::Program(step)
                 }
             };
@@ -292,12 +292,12 @@ impl<'a> Builder<'a> {
 
     fn program_step(
         &mut self,
-        spec: ProgramStepSpec,
+        request: ProgramStepRequest,
         deposits: &[ProgramDeposit],
-    ) -> Result<(ProgramStep, ProgramStepDraft), Error> {
+    ) -> Result<(ProgramStep, PreparedProgramStep), Error> {
         if let Some(deposit) = deposits
             .iter()
-            .find(|deposit| deposit.program_id != spec.program_id)
+            .find(|deposit| deposit.program_id != request.program_id)
         {
             return Err(self.invalid(&format!(
                 "consumes a deposit to another program {:?}",
@@ -309,16 +309,16 @@ impl<'a> Builder<'a> {
             .try_fold(0, |paid: Value, deposit| paid.checked_add(deposit.value))
             .ok_or_else(|| self.invalid("the paid value overflows"))?;
         check_bounds(
-            spec.inputs.len(),
-            spec.program_outputs.len() + spec.outputs.len(),
+            request.inputs.len(),
+            request.program_outputs.len() + request.outputs.len(),
         )
         .map_err(|error| self.invalid(&error.to_string()))?;
-        let inputs = self.inputs(&spec)?;
-        self.check_balance(&spec, &inputs, paid_value)?;
+        let inputs = self.inputs(&request)?;
+        self.check_balance(&request, &inputs, paid_value)?;
 
         let first_input = inputs.first().map(|note| &note.nullifier);
         let (program_notes, outputs) =
-            created_notes(&spec, first_input).map_err(|reason| self.invalid(&reason))?;
+            created_notes(&request, first_input).map_err(|reason| self.invalid(&reason))?;
         let input_notes: Vec<Note> = inputs
             .iter()
             .map(|note| note.opening.note(note.program))
@@ -328,7 +328,7 @@ impl<'a> Builder<'a> {
             .extended(&self.buffer, &inputs)
             .map_err(|error| self.invalid(&format!("the channel's note set is full: {error}")))?;
         let step = ProgramStep {
-            program_id: spec.program_id,
+            program_id: request.program_id,
             inputs: InputNullifiers::try_from_iter(inputs.iter().map(|note| note.nullifier))
                 .map_err(|error| self.invalid(&error.to_string()))?,
             program_outputs: OutputCommitments::try_from_iter(
@@ -341,7 +341,7 @@ impl<'a> Builder<'a> {
             .map_err(|error| self.invalid(&error.to_string()))?,
             commitment_merkle_root: self.spend.root(),
             program_step_id: step_id(&input_notes, &outputs),
-            inscription: spec.inscription,
+            inscription: request.inscription,
         };
         let witness = ZkProgramSpendWitnessInputsData {
             wallet: wallet_inputs(&input_notes, &paths, &outputs),
@@ -350,12 +350,12 @@ impl<'a> Builder<'a> {
                 outputs_active: core::array::from_fn(|j| j < outputs.len()),
                 outputs_of_program: core::array::from_fn(|j| j < program_notes.len()),
                 tx_commitment_root,
-                program_id: spec.program_id,
+                program_id: request.program_id,
                 paid_value,
                 msg: Fr::ZERO,
             },
         };
-        let draft = ProgramStepDraft {
+        let prepared = PreparedProgramStep {
             index: self.index,
             witness: Box::new(witness),
             program_notes,
@@ -366,21 +366,21 @@ impl<'a> Builder<'a> {
                 Fr::ZERO,
             ],
         };
-        Ok((step, draft))
+        Ok((step, prepared))
     }
 
     // The spendable notes of the step's program the step consumes, each
     // once in the inscription.
-    fn inputs(&mut self, spec: &ProgramStepSpec) -> Result<Vec<&'a ProgramNote>, Error> {
+    fn inputs(&mut self, request: &ProgramStepRequest) -> Result<Vec<&'a ProgramNote>, Error> {
         let spend = self.spend;
-        let mut inputs = Vec::with_capacity(spec.inputs.len());
-        for commitment in &spec.inputs {
+        let mut inputs = Vec::with_capacity(request.inputs.len());
+        for commitment in &request.inputs {
             let note = spend.note(commitment).ok_or_else(|| {
                 self.invalid(&format!(
                     "consumes {commitment:?}, not a spendable program note of the channel"
                 ))
             })?;
-            if note.program != spec.program_id {
+            if note.program != request.program_id {
                 return Err(self.invalid(&format!(
                     "consumes {commitment:?}, a note of program {:?}",
                     note.program
@@ -396,7 +396,7 @@ impl<'a> Builder<'a> {
 
     fn check_balance(
         &self,
-        spec: &ProgramStepSpec,
+        request: &ProgramStepRequest,
         inputs: &[&ProgramNote],
         paid_value: Value,
     ) -> Result<(), Error> {
@@ -407,11 +407,11 @@ impl<'a> Builder<'a> {
                 total.checked_add(note.opening.value)
             })
             .ok_or_else(overflow)?;
-        let created = spec
+        let created = request
             .program_outputs
             .iter()
             .map(|output| output.value)
-            .chain(spec.outputs.iter().map(|output| output.value))
+            .chain(request.outputs.iter().map(|output| output.value))
             .try_fold(0, |total: Value, value| total.checked_add(value))
             .ok_or_else(overflow)?;
         if consumed != created {
@@ -424,11 +424,11 @@ impl<'a> Builder<'a> {
 // The notes the step creates, the program's first, with the nonce the spend
 // fixes or the program chose.
 fn created_notes(
-    spec: &ProgramStepSpec,
+    request: &ProgramStepRequest,
     first_input: Option<&NoteNullifier>,
 ) -> Result<(Vec<ProgramNoteOpening>, Vec<Note>), String> {
     let holder = ZkKey::zero().to_public_key();
-    let program_notes = spec
+    let program_notes = request
         .program_outputs
         .iter()
         .enumerate()
@@ -441,7 +441,7 @@ fn created_notes(
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let user_notes = spec
+    let user_notes = request
         .outputs
         .iter()
         .enumerate()
@@ -465,7 +465,7 @@ fn created_notes(
         .collect::<Result<Vec<_>, String>>()?;
     let outputs = program_notes
         .iter()
-        .map(|opening| opening.note(spec.program_id))
+        .map(|opening| opening.note(request.program_id))
         .chain(user_notes)
         .collect();
     Ok((program_notes, outputs))
@@ -635,8 +635,8 @@ mod tests {
         ]
     }
 
-    fn user_step() -> StepSpec {
-        StepSpec::User {
+    fn user_step() -> StepRequest {
+        StepRequest::User {
             step: Step::User(UserStep {
                 inputs: [NoteNullifier(Fr::from(0x23u64))].into(),
                 outputs: user_outputs().into(),
@@ -648,8 +648,8 @@ mod tests {
     }
 
     /// A deposit of `value`, spending a note of its own.
-    fn deposit(program_id: ProgramId, value: Value) -> StepSpec {
-        StepSpec::User {
+    fn deposit(program_id: ProgramId, value: Value) -> StepRequest {
+        StepRequest::User {
             step: Step::ProgramDeposit(ProgramDeposit {
                 program_id,
                 value,
@@ -665,8 +665,8 @@ mod tests {
         inputs: &[u64],
         program_outputs: &[Value],
         outputs: &[(u64, Value)],
-    ) -> StepSpec {
-        StepSpec::Program(ProgramStepSpec {
+    ) -> StepRequest {
+        StepRequest::Program(ProgramStepRequest {
             program_id: program(),
             inputs: inputs.iter().map(|seed| commitment(*seed)).collect(),
             // A step consuming nothing names its nonces: `chosen_nonce`.
@@ -694,8 +694,8 @@ mod tests {
 
     fn build(
         spend: &ProgramNoteSet,
-        mini_blocks: Vec<MiniBlockSpec>,
-    ) -> Result<ProgramInscription, Error> {
+        mini_blocks: Vec<MiniBlockRequest>,
+    ) -> Result<PreparedProgramInscription, Error> {
         build_program_inscription(
             channel(),
             &key(),
@@ -707,19 +707,19 @@ mod tests {
     }
 
     fn program_draft(
-        built: &ProgramInscription,
+        built: &PreparedProgramInscription,
         index: usize,
-    ) -> (&ProgramStep, &ProgramStepDraft) {
+    ) -> (&ProgramStep, &PreparedProgramStep) {
         let Some(Step::Program(step)) = built.op.steps().nth(index) else {
             panic!("step {index} is a program step");
         };
-        let Some(DraftStep::Program(draft)) = built.steps.get(index) else {
-            panic!("step {index} has a program draft");
+        let Some(PreparedStep::Program(prepared)) = built.steps.get(index) else {
+            panic!("step {index} has a program prepared");
         };
-        (step, draft)
+        (step, prepared)
     }
 
-    fn rejection(result: Result<ProgramInscription, Error>) -> String {
+    fn rejection(result: Result<PreparedProgramInscription, Error>) -> String {
         match result {
             Err(Error::InvalidProgramStep(reason)) => reason,
             Err(error) => panic!("another error: {error}"),
@@ -742,13 +742,13 @@ mod tests {
         assert_eq!(built.op.channel_id, channel());
         assert_eq!(built.op.parent, parent());
         assert_eq!(built.op.steps_len(), 2);
-        let Some(DraftStep::User(proof)) = built.steps.first() else {
+        let Some(PreparedStep::User(proof)) = built.steps.first() else {
             panic!("the user's step keeps its proof");
         };
         assert_eq!(*proof, transfer_proof());
 
-        let (step, draft) = program_draft(&built, 1);
-        assert_eq!(draft.index, 1);
+        let (step, prepared) = program_draft(&built, 1);
+        assert_eq!(prepared.index, 1);
         assert_eq!(step.program_id, program());
         assert_eq!(step.inputs.as_slice(), [nullifier(2), nullifier(3)]);
         assert_eq!(
@@ -757,21 +757,24 @@ mod tests {
             "the step names the root of the spend set"
         );
         assert_eq!(
-            draft.witness.chain.tx_commitment_root,
+            prepared.witness.chain.tx_commitment_root,
             extended_root(&user_outputs()),
             "the spend is proven behind the outputs of the user's step"
         );
-        assert_ne!(draft.witness.chain.tx_commitment_root, spend.root());
+        assert_ne!(prepared.witness.chain.tx_commitment_root, spend.root());
 
-        assert_eq!(draft.program_notes.len(), 1);
-        assert_eq!(draft.outputs.len(), 2);
-        assert_eq!(draft.outputs[0], draft.program_notes[0].note(program()));
+        assert_eq!(prepared.program_notes.len(), 1);
+        assert_eq!(prepared.outputs.len(), 2);
         assert_eq!(
-            draft.outputs[0].nonce,
+            prepared.outputs[0],
+            prepared.program_notes[0].note(program())
+        );
+        assert_eq!(
+            prepared.outputs[0].nonce,
             derive_program_output_nonce(&nullifier(2), 0, 4, &holder())
         );
         assert_eq!(
-            draft.outputs[1],
+            prepared.outputs[1],
             Note {
                 value: 1,
                 nonce: derive_program_output_nonce(&nullifier(2), 1, 1, &pk(5)),
@@ -784,24 +787,30 @@ mod tests {
         );
         assert_eq!(
             step.program_outputs.as_slice(),
-            [draft.outputs[0].commitment()]
+            [prepared.outputs[0].commitment()]
         );
-        assert_eq!(step.outputs.as_slice(), [draft.outputs[1].commitment()]);
+        assert_eq!(step.outputs.as_slice(), [prepared.outputs[1].commitment()]);
 
         let op_id = Fr::from_le_bytes_mod_order(&built.op.op_id());
         assert_eq!(
-            draft.program_inputs,
+            prepared.program_inputs,
             [step.program_step_id, program_deposits_hash(&[]), op_id]
         );
-        assert_eq!(draft.witness.chain.msg, op_id);
-        assert_eq!(draft.witness.chain.paid_value, 0);
-        assert_eq!(draft.witness.chain.program_id, program());
+        assert_eq!(prepared.witness.chain.msg, op_id);
+        assert_eq!(prepared.witness.chain.paid_value, 0);
+        assert_eq!(prepared.witness.chain.program_id, program());
         assert_eq!(
-            draft.witness.chain.inputs_active,
+            prepared.witness.chain.inputs_active,
             [true, true, false, false]
         );
-        assert_eq!(draft.witness.chain.outputs_active[..3], [true, true, false]);
-        assert_eq!(draft.witness.chain.outputs_of_program[..2], [true, false]);
+        assert_eq!(
+            prepared.witness.chain.outputs_active[..3],
+            [true, true, false]
+        );
+        assert_eq!(
+            prepared.witness.chain.outputs_of_program[..2],
+            [true, false]
+        );
     }
 
     /// A step after program deposits consumes their value, with their hash
@@ -819,10 +828,10 @@ mod tests {
             ]],
         )
         .unwrap();
-        let (step, draft) = program_draft(&built, 3);
+        let (step, prepared) = program_draft(&built, 3);
         assert_eq!(step.inputs.as_slice(), []);
-        assert_eq!(draft.witness.chain.paid_value, 56);
-        assert_eq!(draft.witness.chain.inputs_active, [false; MAX_INPUTS]);
+        assert_eq!(prepared.witness.chain.paid_value, 56);
+        assert_eq!(prepared.witness.chain.inputs_active, [false; MAX_INPUTS]);
         let deposits: Vec<&ProgramDeposit> = built
             .op
             .steps()
@@ -832,9 +841,9 @@ mod tests {
             })
             .collect();
         assert_eq!(deposits.len(), 2);
-        assert_eq!(draft.program_inputs[1], program_deposits_hash(&deposits));
+        assert_eq!(prepared.program_inputs[1], program_deposits_hash(&deposits));
         assert_eq!(
-            draft.outputs[0].nonce,
+            prepared.outputs[0].nonce,
             chosen_nonce(56),
             "a step consuming nothing uses the nonce the program chose"
         );
@@ -847,7 +856,7 @@ mod tests {
             )
             .collect();
         assert_eq!(
-            draft.witness.chain.tx_commitment_root,
+            prepared.witness.chain.tx_commitment_root,
             extended_root(&buffer),
             "the spend is proven behind the deposits' change too"
         );
@@ -907,13 +916,13 @@ mod tests {
                 created: HashMap::from([(foreign_note, (other, opening(4)))]),
             })
             .unwrap();
-        let mut spec = program_step(&[], &[4], &[]);
-        let StepSpec::Program(step) = &mut spec else {
+        let mut request = program_step(&[], &[4], &[]);
+        let StepRequest::Program(step) = &mut request else {
             unreachable!()
         };
         step.inputs = vec![foreign_note];
         assert_eq!(
-            rejection(build(&with_other, vec![vec![spec]])),
+            rejection(build(&with_other, vec![vec![request]])),
             format!("step 0: consumes {foreign_note:?}, a note of program {other:?}")
         );
         assert_eq!(
@@ -946,7 +955,7 @@ mod tests {
             "step 0: a ZkProgramSpend spends at most 4 notes: got 5"
         );
         let mut unnamed = program_step(&[], &[5], &[]);
-        let StepSpec::Program(step) = &mut unnamed else {
+        let StepRequest::Program(step) = &mut unnamed else {
             unreachable!()
         };
         step.program_outputs[0].nonce = None;
@@ -955,7 +964,7 @@ mod tests {
             "step 1: a step consuming nothing names the nonce of output 0"
         );
         let mut fixed = program_step(&[2], &[2], &[]);
-        let StepSpec::Program(step) = &mut fixed else {
+        let StepRequest::Program(step) = &mut fixed else {
             unreachable!()
         };
         step.program_outputs[0].nonce = Some(Fr::from(9u64));
@@ -963,7 +972,7 @@ mod tests {
             rejection(build(&spend, vec![vec![fixed]])),
             "step 0: the nonce of output 0 is derived from the first input"
         );
-        let misfit = StepSpec::User {
+        let misfit = StepRequest::User {
             step: Step::ProgramDeposit(ProgramDeposit::sample()),
             proof: StepProof::sample_for(StepProofShape::ProgramStep { program_notes: 0 }),
         };
@@ -992,13 +1001,13 @@ mod tests {
             .step_proofs(vec![(sample.spend_proof, sample.program_proof)])
             .unwrap();
         assert_eq!(proofs[0], transfer_proof());
-        let (_, draft) = program_draft(&built, 1);
+        let (_, prepared) = program_draft(&built, 1);
         assert_eq!(
             proofs[1],
             StepProof::ProgramStep(ProgramStepProof {
                 spend_proof: sample.spend_proof,
                 program_proof: sample.program_proof,
-                program_notes: draft.program_notes.clone(),
+                program_notes: prepared.program_notes.clone(),
             })
         );
         check_step_proofs(&built.op, &proofs).unwrap();
@@ -1018,8 +1027,8 @@ mod tests {
             vec![vec![user_step(), program_step(&[2, 3], &[4], &[(5, 1)])]],
         )
         .unwrap();
-        let (step, draft) = program_draft(&built, 1);
-        let proof = prove_program_step(draft).unwrap();
+        let (step, prepared) = program_draft(&built, 1);
+        let proof = prove_program_step(prepared).unwrap();
         let outputs = step.outputs();
         let public = ZkProgramSpendVerifierInput::new(&ZkProgramSpendPublic {
             inputs: &step

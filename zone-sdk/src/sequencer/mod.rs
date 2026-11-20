@@ -96,8 +96,8 @@ pub use lb_core::{
 };
 pub use lb_key_management_system_service::keys::{Ed25519Key, UnverifiedEd25519PublicKey};
 pub use program_steps::{
-    DraftStep, MiniBlockSpec, ProgramInscription, ProgramOutput, ProgramStepDraft, ProgramStepSpec,
-    StepSpec, UserOutput, prove_program_step,
+    MiniBlockRequest, PreparedProgramInscription, PreparedProgramStep, PreparedStep, ProgramOutput,
+    ProgramStepRequest, StepRequest, UserOutput, prove_program_step,
 };
 // Pure key-only signing primitive for prepared multi-sig artifacts — usable by
 // an offline key holder with no sequencer or chain state.

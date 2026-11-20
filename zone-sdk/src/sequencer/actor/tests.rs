@@ -2622,7 +2622,7 @@ async fn prepare_program_inscription_spends_the_tracked_notes_and_submits() {
 
     use crate::{
         sequencer::{
-            ProgramStepSpec, StepSpec, UserOutput,
+            ProgramStepRequest, StepRequest, UserOutput,
             program_notes::fixtures::{foreign, program, sample_opening},
         },
         test_support::{inscribe_op, unverified_tx_with_ops},
@@ -2696,7 +2696,7 @@ async fn prepare_program_inscription_spends_the_tracked_notes_and_submits() {
         .handle()
         .prepare_program_inscription(
             Inscription::new_unchecked(b"zone block".to_vec()),
-            vec![vec![StepSpec::Program(ProgramStepSpec {
+            vec![vec![StepRequest::Program(ProgramStepRequest {
                 program_id: program(),
                 inputs: vec![commitment],
                 program_outputs: vec![],
@@ -2715,15 +2715,15 @@ async fn prepare_program_inscription_spends_the_tracked_notes_and_submits() {
         mined.id(),
         "chains on the mined inscription"
     );
-    let draft = built
+    let prepared = built
         .program_steps()
         .next()
         .expect("the inscription has a program step");
     assert_eq!(
-        draft.witness.chain.tx_commitment_root, view.root,
+        prepared.witness.chain.tx_commitment_root, view.root,
         "a first mini-block is proven against the root on chain"
     );
-    assert_eq!(draft.outputs[0].public_key, payee);
+    assert_eq!(prepared.outputs[0].public_key, payee);
 
     let StepProof::ProgramStep(sample) =
         StepProof::sample_for(StepProofShape::ProgramStep { program_notes: 0 })
@@ -2748,7 +2748,7 @@ async fn prepare_program_inscription_spends_the_tracked_notes_and_submits() {
         matches!(
             sequencer.handle().prepare_program_inscription(
                 Inscription::new_unchecked(b"again".to_vec()),
-                vec![vec![StepSpec::Program(ProgramStepSpec {
+                vec![vec![StepRequest::Program(ProgramStepRequest {
                     program_id: program(),
                     inputs: vec![commitment],
                     program_outputs: vec![],

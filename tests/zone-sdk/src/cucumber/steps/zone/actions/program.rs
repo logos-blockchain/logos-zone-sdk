@@ -31,8 +31,8 @@ use lb_testing_framework::NodeHttpClient;
 use lb_zone_sdk::{
     node_types::ProgramProof,
     sequencer::{
-        Error as SequencerError, ProgramInscription, ProgramOutput, ProgramStepSpec, StepSpec,
-        UserOutput, prove_program_step,
+        Error as SequencerError, PreparedProgramInscription, ProgramOutput, ProgramStepRequest,
+        StepRequest, UserOutput, prove_program_step,
     },
 };
 use tokio::time::{sleep, timeout};
@@ -404,11 +404,11 @@ async fn try_publish_program_block(
                 });
             };
             vec![
-                StepSpec::User {
+                StepRequest::User {
                     step: step.clone(),
                     proof: proof.clone(),
                 },
-                StepSpec::Program(program_step(
+                StepRequest::Program(program_step(
                     program,
                     payload,
                     Vec::new(),
@@ -423,7 +423,7 @@ async fn try_publish_program_block(
                 return Ok(None);
             }
             let value = inputs.iter().map(|(_, value)| value).sum();
-            vec![StepSpec::Program(program_step(
+            vec![StepRequest::Program(program_step(
                 program,
                 payload,
                 inputs
@@ -498,8 +498,8 @@ fn program_step(
     inputs: Vec<NoteCommitment>,
     program_outputs: Vec<ProgramOutput>,
     outputs: Vec<UserOutput>,
-) -> ProgramStepSpec {
-    ProgramStepSpec {
+) -> ProgramStepRequest {
+    ProgramStepRequest {
         program_id: program.info.program_id,
         inputs,
         program_outputs,
@@ -513,8 +513,8 @@ fn program_step(
 async fn prepare_built(
     client: &SequencerClient,
     payload: &Inscription,
-    mini_block: Vec<StepSpec>,
-) -> Option<ProgramInscription> {
+    mini_block: Vec<StepRequest>,
+) -> Option<PreparedProgramInscription> {
     client
         .prepare_program_inscription(payload.clone(), vec![mini_block])
         .await
@@ -528,17 +528,18 @@ async fn prepare_built(
 // sequencer's prover and the program by the toy circuit, with the program
 // notes and the user notes its program step creates.
 async fn prove_block(
-    built: &ProgramInscription,
+    built: &PreparedProgramInscription,
     program: &ZoneProgram,
 ) -> Result<(Vec<StepProof>, Vec<NoteCommitment>, Vec<Note>), StepError> {
-    let draft = built
-        .program_steps()
-        .next()
-        .cloned()
-        .ok_or_else(|| StepError::LogicalError {
-            message: "The built inscription carries no program step".to_owned(),
-        })?;
-    let proving = draft.clone();
+    let prepared =
+        built
+            .program_steps()
+            .next()
+            .cloned()
+            .ok_or_else(|| StepError::LogicalError {
+                message: "The built inscription carries no program step".to_owned(),
+            })?;
+    let proving = prepared.clone();
     let spend_proof = tokio::task::spawn_blocking(move || prove_program_step(&proving))
         .await
         .map_err(|error| StepError::LogicalError {
@@ -548,7 +549,8 @@ async fn prove_block(
             message: format!("The spend proof failed: {error}"),
         })?;
     let (_, proving_key) = three_input_setup(program.circuit_seed);
-    let program_proof = three_input_prove(&proving_key, draft.program_inputs, program.circuit_seed);
+    let program_proof =
+        three_input_prove(&proving_key, prepared.program_inputs, program.circuit_seed);
     let program_proof = ProgramProof::new(
         CompressedGroth16Proof::try_from(&program_proof).map_err(|error| {
             StepError::LogicalError {
@@ -561,12 +563,12 @@ async fn prove_block(
         .map_err(|error| StepError::LogicalError {
             message: format!("The step proofs do not fit: {error}"),
         })?;
-    let program_notes = draft.program_notes.len();
-    let created = draft.outputs[..program_notes]
+    let program_notes = prepared.program_notes.len();
+    let created = prepared.outputs[..program_notes]
         .iter()
         .map(Note::commitment)
         .collect();
-    let paid = draft.outputs[program_notes..].to_vec();
+    let paid = prepared.outputs[program_notes..].to_vec();
     Ok((proofs, created, paid))
 }
 
@@ -574,7 +576,7 @@ async fn prove_block(
 // tip moved under it or the submission failed, to rebuild.
 async fn submit_built(
     client: &SequencerClient,
-    built: &ProgramInscription,
+    built: &PreparedProgramInscription,
     proofs: Vec<StepProof>,
 ) -> Option<PublishResult> {
     match client

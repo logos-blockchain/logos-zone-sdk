@@ -30,7 +30,7 @@
 //! [`sequencer::prove_program_step`], off the drive loop; the zone adds its
 //! program proof and publishes the inscription with
 //! [`sequencer::SequencerHandle::submit_prepared_inscription`] and
-//! [`sequencer::ProgramInscription::step_proofs`].
+//! [`sequencer::PreparedProgramInscription::step_proofs`].
 //!
 //! # Quick start (sequencer)
 //!
