@@ -24,17 +24,13 @@ lb-utils                         = { workspace = true }
 lb-zone-sdk                      = { workspace = true }
 rand                             = { features = ["getrandom"], workspace = true }
 reqwest                          = { workspace = true }
-rusqlite                         = { features = ["backup", "bundled", "fallible_uint", "functions", "hooks", "limits"], workspace = true }
+rusqlite                         = { features = ["backup", "bundled", "functions", "hooks"], workspace = true }
 thiserror                        = { workspace = true }
 tokio                            = { features = ["macros", "rt", "sync", "time"], workspace = true }
 tracing                          = { workspace = true }
 
 [dev-dependencies]
-chacha20poly1305 = { features = ["alloc", "rand_core"], workspace = true }
-clap             = { features = ["derive", "env", "help", "std"], workspace = true }
-hex              = { workspace = true }
-lb-core          = { features = ["test-utils"], workspace = true }
-lb-groth16       = { workspace = true }
-tempfile         = { workspace = true }
-tokio            = { features = ["io-util", "net"], workspace = true }
-zeroize          = { features = ["alloc"], workspace = true }
+clap       = { features = ["derive", "env", "help", "std"], workspace = true }
+hex        = { workspace = true }
+lb-groth16 = { workspace = true }
+tempfile   = { workspace = true }

@@ -6,19 +6,12 @@ use clap::Parser;
 use lb_groth16::fr_from_bytes;
 use lb_key_management_system_service::keys::{Ed25519Key, ZkPublicKey};
 use lb_zone_sdk::{node_types::ChannelId, sequencer::FundingConfig};
-use logos_sql::{LogosSqlConfig, PublicationConfig, WriterConfig};
+use logos_sql::{LogosSqlConfig, WriterConfig};
 use reqwest::Url;
-
-use crate::{AppResult, encryption::Encryption};
 
 #[derive(Parser)]
 #[command(name = "password-manager")]
 struct Options {
-    /// File containing a separate random 32-byte encryption key (not a
-    /// password).
-    #[arg(long, env = "LOGOS_SQL_ENCRYPTION_KEY_FILE")]
-    encryption_key_file: PathBuf,
-
     /// Channel carrying the shared password-manager writes.
     #[arg(long, env = "LOGOS_SQL_CHANNEL_ID", value_parser = parse_channel_id)]
     channel_id: ChannelId,
@@ -53,16 +46,13 @@ struct Options {
 }
 
 /// Parses startup options and builds the `λSQL` configuration.
-pub fn from_args() -> AppResult<(LogosSqlConfig, Encryption)> {
+pub fn from_args() -> LogosSqlConfig {
     let options = Options::parse();
-    let encryption =
-        Encryption::from_file(&options.encryption_key_file, options.channel_id.as_ref())?;
 
-    let config = LogosSqlConfig {
+    LogosSqlConfig {
         channel_id: options.channel_id,
         node_url: options.node_url,
         writer: Some(WriterConfig {
-            publication: PublicationConfig::default(),
             signing_key: options.signing_key,
             funding: FundingConfig {
                 funding_pk: options.funding_key,
@@ -72,9 +62,7 @@ pub fn from_args() -> AppResult<(LogosSqlConfig, Encryption)> {
             },
         }),
         state_dir: options.state_dir,
-    };
-
-    Ok((config, encryption))
+    }
 }
 
 fn parse_channel_id(value: &str) -> Result<ChannelId, String> {

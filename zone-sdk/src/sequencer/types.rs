@@ -909,8 +909,6 @@ pub enum FinalizedOp {
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZero;
-
     use lb_core::mantle::{
         Op,
         channel::{SlotTimeframe, SlotTimeout},
@@ -920,13 +918,12 @@ mod tests {
             withdraw::ChannelWithdrawOp,
         },
         traits::Hashable as _,
-        transactions::{Ops, TxList},
+        transactions::Ops,
     };
     use lb_groth16::Fr;
     use lb_key_management_system_service::keys::{Ed25519Key, Ed25519PublicKey};
 
     use super::{Error, PreparedChannelConfig, sign_prepared};
-    use crate::test_support::FORK_DIGEST;
 
     /// The signing payload the SDK derives for `ops`.
     fn payload_of(ops: &Ops) -> Vec<u8> {
@@ -934,16 +931,15 @@ mod tests {
     }
 
     fn config_op(keys: Vec<Ed25519PublicKey>) -> ChannelConfigOp {
-        ChannelConfigOp::new(
-            ChannelId::from([7; 32]),
-            MsgId::root(),
-            VerifiedChannelKeys::new_unchecked(keys),
-            SlotTimeframe::from(15),
-            SlotTimeout::from(3),
-            NonZero::<u16>::MIN,
-            NonZero::new(2).unwrap(),
-        )
-        .unwrap()
+        ChannelConfigOp {
+            channel: ChannelId::from([7; 32]),
+            parent: MsgId::root(),
+            keys: VerifiedChannelKeys::new_unchecked(keys),
+            posting_timeframe: SlotTimeframe::from(15),
+            posting_timeout: SlotTimeout::from(3),
+            configuration_threshold: 2,
+            transfer_threshold: 2,
+        }
     }
 
     #[test]
@@ -954,10 +950,7 @@ mod tests {
             .collect();
         let op = config_op(new_keys);
         let prepared = PreparedChannelConfig {
-            tx: Ops::new(
-                FORK_DIGEST,
-                TxList::new_unchecked(vec![Op::ChannelConfig(op.clone())]),
-            ),
+            tx: Ops::new_unchecked(vec![Op::ChannelConfig(op.clone())]),
             transfer_proof: None,
             sign_payload: vec![0xab; 32],
             accredited_keys: Vec::new(),
@@ -979,10 +972,7 @@ mod tests {
             .iter()
             .map(|k| k.into_unverified())
             .collect::<Vec<_>>();
-        let tx = Ops::new(
-            FORK_DIGEST,
-            TxList::new_unchecked(vec![Op::ChannelConfig(config_op(accredited))]),
-        );
+        let tx = Ops::new_unchecked(vec![Op::ChannelConfig(config_op(accredited))]);
         let prepared = PreparedChannelConfig {
             sign_payload: payload_of(&tx),
             tx,
@@ -1014,10 +1004,7 @@ mod tests {
             channel_id: ChannelId::from([7; 32]),
             inputs: BoundedInputs::from(NoteId::from(Fr::from(1u64))).into(),
         });
-        let tx = Ops::new(
-            FORK_DIGEST,
-            TxList::new_unchecked(vec![config.clone(), smuggled.clone()]),
-        );
+        let tx = Ops::new_unchecked(vec![config.clone(), smuggled.clone()]);
         let prepared = PreparedChannelConfig {
             sign_payload: payload_of(&tx),
             tx,
@@ -1040,10 +1027,7 @@ mod tests {
         let accredited = vec![signer.public_key()];
         let accredited_as_unverified_keys =
             accredited.iter().map(|k| k.into_unverified()).collect();
-        let tx = Ops::new(
-            FORK_DIGEST,
-            TxList::new_unchecked(vec![Op::ChannelConfig(config_op(accredited))]),
-        );
+        let tx = Ops::new_unchecked(vec![Op::ChannelConfig(config_op(accredited))]);
         // Honest-looking ops, but the payload belongs to some other tx.
         let prepared = PreparedChannelConfig {
             tx,

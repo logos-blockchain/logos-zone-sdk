@@ -117,9 +117,9 @@ fn opaque_lineage(
                 }
                 last_msg = Some(inscribe.id());
             }
-            OpRef::ChannelConfig(config) if config.channel() == channel_id => {
+            OpRef::ChannelConfig(config) if config.channel == channel_id => {
                 if last_config.is_none() {
-                    config_parent = Some(config.parent());
+                    config_parent = Some(config.parent);
                 }
                 last_config = Some(config.id());
             }
@@ -1768,7 +1768,7 @@ mod tests {
     use lb_key_management_system_service::keys::Ed25519PublicKey;
 
     use super::*;
-    use crate::test_support::{FORK_DIGEST, header_id};
+    use crate::test_support::header_id;
 
     /// A mined channel tx as the block store holds it.
     fn stored(tx: &SignedOps<Unverified, StandardMode>, kind: ChannelTxKind) -> BlockChannelTx {
@@ -1780,15 +1780,12 @@ mod tests {
     }
 
     fn make_dummy_tx_on(parent: MsgId, data: u8) -> SignedOps<Unverified, StandardMode> {
-        let mantle_tx = Ops::new(
-            FORK_DIGEST,
-            [Op::ChannelInscribe(InscriptionOp {
-                channel_id: [0u8; 32].into(),
-                inscription: Inscription::new_unchecked(vec![data]),
-                parent,
-                signer: UnverifiedEd25519PublicKey::from_bytes(&[0u8; 32]).unwrap(),
-            })],
-        );
+        let mantle_tx = Ops::from([Op::ChannelInscribe(InscriptionOp {
+            channel_id: [0u8; 32].into(),
+            inscription: [data].into(),
+            parent,
+            signer: UnverifiedEd25519PublicKey::from_bytes(&[0u8; 32]).unwrap(),
+        })]);
         SignedOps::from_ops_with_sample_proofs(mantle_tx)
     }
 
@@ -2008,45 +2005,48 @@ mod tests {
         config_parent: MsgId,
         data: u8,
     ) -> (SignedOps<Unverified, StandardMode>, MsgId, MsgId) {
-        bundle_tx_with(parent, config_parent, data, FORK_DIGEST)
+        bundle_tx_with(parent, config_parent, data, [])
     }
 
-    /// [`bundle_tx_on`] under `fork_digest`: the same ops, another hash.
-    fn bundle_tx_with(
+    /// [`bundle_tx_on`] with `extra` ops appended: the same channel
+    /// messages, another hash.
+    fn bundle_tx_with<const N: usize>(
         parent: MsgId,
         config_parent: MsgId,
         data: u8,
-        fork_digest: lb_core::era::ForkDigest,
+        extra: [Op; N],
     ) -> (SignedOps<Unverified, StandardMode>, MsgId, MsgId) {
-        use std::num::NonZero;
-
         use lb_core::mantle::{
             channel::{SlotTimeframe, SlotTimeout},
             ops::channel::{VerifiedChannelKeys, config::ChannelConfigOp},
         };
         let inscribe = InscriptionOp {
             channel_id: [0u8; 32].into(),
-            inscription: Inscription::new_unchecked(vec![data]),
+            inscription: [data].into(),
             parent,
             signer: UnverifiedEd25519PublicKey::from_bytes(&[0u8; 32]).unwrap(),
         };
-        let config = ChannelConfigOp::new(
-            [0u8; 32].into(),
-            config_parent,
-            VerifiedChannelKeys::try_from(vec![Ed25519PublicKey::from_bytes(&[1u8; 32]).unwrap()])
-                .unwrap(),
-            SlotTimeframe::from(0u32),
-            SlotTimeout::from(0u32),
-            NonZero::<u16>::MIN,
-            NonZero::<u16>::MIN,
-        )
-        .unwrap();
+        let config = ChannelConfigOp {
+            channel: [0u8; 32].into(),
+            parent: config_parent,
+            keys: VerifiedChannelKeys::try_from(vec![
+                Ed25519PublicKey::from_bytes(&[1u8; 32]).unwrap(),
+            ])
+            .unwrap(),
+            posting_timeframe: SlotTimeframe::from(0u32),
+            posting_timeout: SlotTimeout::from(0u32),
+            configuration_threshold: 1,
+            transfer_threshold: 1,
+        };
         let inscribe_msg = inscribe.id();
         let config_msg = config.id();
-        let ops = Ops::new(
-            fork_digest,
-            [Op::ChannelInscribe(inscribe), Op::ChannelConfig(config)],
-        );
+        let ops = Ops::try_from(
+            [Op::ChannelInscribe(inscribe), Op::ChannelConfig(config)]
+                .into_iter()
+                .chain(extra)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
         let tx = SignedOps::from_ops_with_sample_proofs(ops);
         (tx, inscribe_msg, config_msg)
     }
@@ -2141,11 +2141,18 @@ mod tests {
         state.submit_other(pending, channel_id).unwrap();
         let before = state.channel_lineage(b1);
 
+        // An extra inscription on another channel changes the tx hash but
+        // not this channel's messages.
         let (mined, _, _) = bundle_tx_with(
             MsgId::root(),
             MsgId::root(),
             1,
-            lb_core::era::ForkDigest::new([0x22; 32]),
+            [Op::ChannelInscribe(InscriptionOp {
+                channel_id: [1u8; 32].into(),
+                inscription: [1].into(),
+                parent: MsgId::root(),
+                signer: UnverifiedEd25519PublicKey::from_bytes(&[0u8; 32]).unwrap(),
+            })],
         );
         let mined_hash = mined.hash();
         assert_ne!(
@@ -2308,22 +2315,12 @@ mod tests {
         state.process_block(tip, genesis, genesis, vec![], vec![], Vec::new(), vec![]);
 
         state
-            .submit_inscription(
-                make_dummy_tx(1),
-                MsgId::root(),
-                msg_id(10),
-                Inscription::new_unchecked(vec![1]),
-            )
+            .submit_inscription(make_dummy_tx(1), MsgId::root(), msg_id(10), [1].into())
             .unwrap();
         let (bundle, inscribe_msg, _config_msg) = bundle_tx(msg_id(10), 2);
         state.submit_other(bundle, channel_id).unwrap();
         state
-            .submit_inscription(
-                make_dummy_tx(3),
-                inscribe_msg,
-                msg_id(30),
-                Inscription::new_unchecked(vec![3]),
-            )
+            .submit_inscription(make_dummy_tx(3), inscribe_msg, msg_id(30), [3].into())
             .unwrap();
 
         assert_eq!(state.publish_parent(tip), msg_id(30));
@@ -2340,12 +2337,7 @@ mod tests {
         let first = make_dummy_tx(1);
         let first_hash = first.hash();
         state
-            .submit_inscription(
-                first,
-                MsgId::root(),
-                msg_id(10),
-                Inscription::new_unchecked(vec![1]),
-            )
+            .submit_inscription(first, MsgId::root(), msg_id(10), [1].into())
             .unwrap();
         let (bundle, _i, _c) = bundle_tx(MsgId::root(), 2);
         assert_eq!(
@@ -2363,8 +2355,6 @@ mod tests {
     /// chaining on the existing pending chain meanwhile.
     #[test]
     fn publish_parent_ignores_pending_pure_config_cut() {
-        use std::num::NonZero;
-
         use lb_core::mantle::{
             channel::{SlotTimeframe, SlotTimeout},
             ops::channel::{VerifiedChannelKeys, config::ChannelConfigOp},
@@ -2376,26 +2366,22 @@ mod tests {
         state.process_block(tip, genesis, genesis, vec![], vec![], Vec::new(), vec![]);
 
         state
-            .submit_inscription(
-                make_dummy_tx(1),
-                MsgId::root(),
-                msg_id(10),
-                Inscription::new_unchecked(vec![1]),
-            )
+            .submit_inscription(make_dummy_tx(1), MsgId::root(), msg_id(10), [1].into())
             .unwrap();
 
-        let config = ChannelConfigOp::new(
-            [0u8; 32].into(),
-            MsgId::root(),
-            VerifiedChannelKeys::try_from(vec![Ed25519PublicKey::from_bytes(&[1u8; 32]).unwrap()])
-                .unwrap(),
-            SlotTimeframe::from(0u32),
-            SlotTimeout::from(0u32),
-            NonZero::<u16>::MIN,
-            NonZero::<u16>::MIN,
-        )
-        .unwrap();
-        let ops = Ops::new(FORK_DIGEST, [Op::ChannelConfig(config)]);
+        let config = ChannelConfigOp {
+            channel: [0u8; 32].into(),
+            parent: MsgId::root(),
+            keys: VerifiedChannelKeys::try_from(vec![
+                Ed25519PublicKey::from_bytes(&[1u8; 32]).unwrap(),
+            ])
+            .unwrap(),
+            posting_timeframe: SlotTimeframe::from(0u32),
+            posting_timeout: SlotTimeout::from(0u32),
+            configuration_threshold: 1,
+            transfer_threshold: 1,
+        };
+        let ops = Ops::from([Op::ChannelConfig(config)]);
         let config_tx = SignedOps::from_ops_with_sample_proofs(ops);
         state.submit_other(config_tx, channel_id).unwrap();
 
@@ -2447,7 +2433,7 @@ mod tests {
         let hash = tx.hash();
         let msg = dummy_tx_msg(&tx);
         state
-            .submit_inscription(tx, parent, msg, Inscription::new_unchecked(vec![data]))
+            .submit_inscription(tx, parent, msg, [data].into())
             .unwrap();
         (hash, msg)
     }
@@ -2465,7 +2451,7 @@ mod tests {
             Arc::clone(&stored),
             MsgId::root(),
             msg,
-            Inscription::new_unchecked(vec![1]),
+            [1].into(),
             PendingBundle::Plain,
         );
 
@@ -2887,10 +2873,7 @@ mod tests {
     ) -> (SignedOps<Unverified, StandardMode>, MsgId) {
         let config = config_op(config_parent, seed);
         let id = config.id();
-        let tx = SignedOps::from_ops_with_sample_proofs(Ops::new(
-            FORK_DIGEST,
-            [Op::ChannelConfig(config)],
-        ));
+        let tx = SignedOps::from_ops_with_sample_proofs(Ops::from([Op::ChannelConfig(config)]));
         (tx, id)
     }
 
@@ -2899,26 +2882,23 @@ mod tests {
         config_parent: MsgId,
         seed: u8,
     ) -> lb_core::mantle::ops::channel::config::ChannelConfigOp {
-        use std::num::NonZero;
-
         use lb_core::mantle::{
             channel::{SlotTimeframe, SlotTimeout},
             ops::channel::{VerifiedChannelKeys, config::ChannelConfigOp},
         };
-        ChannelConfigOp::new(
-            [0u8; 32].into(),
-            config_parent,
-            VerifiedChannelKeys::try_from(vec![
+        ChannelConfigOp {
+            channel: [0u8; 32].into(),
+            parent: config_parent,
+            keys: VerifiedChannelKeys::try_from(vec![
                 lb_key_management_system_service::keys::Ed25519Key::from_bytes(&[seed; 32])
                     .public_key(),
             ])
             .unwrap(),
-            SlotTimeframe::from(0u32),
-            SlotTimeout::from(0u32),
-            NonZero::<u16>::MIN,
-            NonZero::<u16>::MIN,
-        )
-        .unwrap()
+            posting_timeframe: SlotTimeframe::from(0u32),
+            posting_timeout: SlotTimeout::from(0u32),
+            configuration_threshold: 1,
+            transfer_threshold: 1,
+        }
     }
 
     /// A whole expired chain is reported parent first whatever the hash
@@ -3032,23 +3012,19 @@ mod tests {
         let mut state = TxState::new(genesis, MsgId::root());
         state.process_block(tip, genesis, genesis, vec![], vec![], Vec::new(), vec![]);
         let again_op = config_op(MsgId::root(), 4);
-        let again = SignedOps::from_ops_with_sample_proofs(Ops::new(
-            FORK_DIGEST,
-            [Op::ChannelConfig(again_op.clone())],
-        ));
+        let again = SignedOps::from_ops_with_sample_proofs(Ops::from([Op::ChannelConfig(
+            again_op.clone(),
+        )]));
         let again_hash = again.hash();
         state.submit_other(again, channel_id).unwrap();
-        let same_config_other_tx = SignedOps::from_ops_with_sample_proofs(Ops::new(
-            FORK_DIGEST,
-            [
-                Op::ChannelInscribe(crate::test_support::inscribe_op(
-                    channel_id,
-                    MsgId::root(),
-                    b"beside the config",
-                )),
-                Op::ChannelConfig(again_op),
-            ],
-        ));
+        let same_config_other_tx = SignedOps::from_ops_with_sample_proofs(Ops::from([
+            Op::ChannelInscribe(crate::test_support::inscribe_op(
+                channel_id,
+                MsgId::root(),
+                b"beside the config",
+            )),
+            Op::ChannelConfig(again_op),
+        ]));
         assert_ne!(same_config_other_tx.hash(), again_hash);
         state.observe_other_tx(same_config_other_tx, channel_id);
 
@@ -3075,7 +3051,7 @@ mod tests {
             original,
             MsgId::root(),
             msg,
-            Inscription::new_unchecked(vec![1]),
+            [1].into(),
             PendingBundle::Plain,
         );
         state.process_block(
@@ -3310,10 +3286,10 @@ mod tests {
                 inputs: lb_core::mantle::ledger::BoundedInputs::from(input).into(),
                 outputs: Outputs::new([Note::new(5, pk)]),
             };
-            let tx = SignedOps::from_ops_with_sample_proofs(Ops::new(
-                FORK_DIGEST,
-                [Op::ChannelTransfer(transfer), Op::ChannelInscribe(inscribe)],
-            ));
+            let tx = SignedOps::from_ops_with_sample_proofs(Ops::from([
+                Op::ChannelTransfer(transfer),
+                Op::ChannelInscribe(inscribe),
+            ]));
             (tx, msg)
         };
         let (live, live_msg) = bundle(MsgId::root(), present, 1);
@@ -3397,12 +3373,7 @@ mod tests {
         let tx = make_dummy_tx(data);
         let hash = tx.hash();
         state
-            .submit_inscription(
-                tx,
-                parent_msg,
-                this_msg,
-                Inscription::new_unchecked(vec![data]),
-            )
+            .submit_inscription(tx, parent_msg, this_msg, [data].into())
             .unwrap();
         hash
     }
@@ -3410,28 +3381,24 @@ mod tests {
     /// Build a pure `[config]` tx for the zero channel; `data` varies the
     /// payload so ids differ.
     fn config_tx(parent: MsgId, data: u32) -> (SignedOps<Unverified, StandardMode>, MsgId) {
-        use std::num::NonZero;
-
         use lb_core::mantle::{
             channel::{SlotTimeframe, SlotTimeout},
             ops::channel::{VerifiedChannelKeys, config::ChannelConfigOp},
         };
-        let config = ChannelConfigOp::new(
-            [0u8; 32].into(),
+        let config = ChannelConfigOp {
+            channel: [0u8; 32].into(),
             parent,
-            VerifiedChannelKeys::try_from(vec![Ed25519PublicKey::from_bytes(&[1u8; 32]).unwrap()])
-                .unwrap(),
-            SlotTimeframe::from(data),
-            SlotTimeout::from(0u32),
-            NonZero::<u16>::MIN,
-            NonZero::<u16>::MIN,
-        )
-        .unwrap();
+            keys: VerifiedChannelKeys::try_from(vec![
+                Ed25519PublicKey::from_bytes(&[1u8; 32]).unwrap(),
+            ])
+            .unwrap(),
+            posting_timeframe: SlotTimeframe::from(data),
+            posting_timeout: SlotTimeout::from(0u32),
+            configuration_threshold: 1,
+            transfer_threshold: 1,
+        };
         let config_msg = config.id();
-        let tx = SignedOps::from_ops_with_sample_proofs(Ops::new(
-            FORK_DIGEST,
-            [Op::ChannelConfig(config)],
-        ));
+        let tx = SignedOps::from_ops_with_sample_proofs(Ops::from([Op::ChannelConfig(config)]));
         (tx, config_msg)
     }
 
@@ -3450,7 +3417,7 @@ mod tests {
                 tx_hash: tx.hash(),
                 parent_msg: parent,
                 this_msg,
-                payload: Inscription::empty(),
+                payload: [].into(),
                 signer: None,
             }),
         )
@@ -3572,7 +3539,7 @@ mod tests {
             tx_hash: tx.hash(),
             parent_msg: parent,
             this_msg,
-            payload: Inscription::empty(),
+            payload: [].into(),
             signer: None,
         };
         let custom = stored(
@@ -3782,7 +3749,7 @@ mod tests {
             tx_hash: p1,
             parent_msg: MsgId::root(),
             this_msg: msg_id(1),
-            payload: Inscription::new_unchecked(vec![1]),
+            payload: [1].into(),
             signer: Some(test_signer()),
         };
         state.process_block(
@@ -3857,10 +3824,10 @@ mod tests {
             parent: first.id(),
             signer,
         };
-        let custom = SignedOps::from_ops_with_sample_proofs(Ops::new(
-            FORK_DIGEST,
-            [Op::ChannelInscribe(first), Op::ChannelInscribe(second)],
-        ));
+        let custom = SignedOps::from_ops_with_sample_proofs(Ops::from([
+            Op::ChannelInscribe(first),
+            Op::ChannelInscribe(second),
+        ]));
         let custom_hash = custom.hash();
         state.submit_other(custom, channel_id).unwrap();
         assert_eq!(
@@ -3926,10 +3893,10 @@ mod tests {
             signer,
         };
         let last_msg = second.id();
-        let custom = SignedOps::from_ops_with_sample_proofs(Ops::new(
-            FORK_DIGEST,
-            [Op::ChannelInscribe(first), Op::ChannelInscribe(second)],
-        ));
+        let custom = SignedOps::from_ops_with_sample_proofs(Ops::from([
+            Op::ChannelInscribe(first),
+            Op::ChannelInscribe(second),
+        ]));
         let custom_hash = custom.hash();
         state.submit_other(custom, channel_id).unwrap();
         let p1 = submit_fake_inscription(&mut state, 1, last_msg, msg_id(1));
@@ -3983,7 +3950,7 @@ mod tests {
             tx_hash: make_dummy_tx(1).hash(),
             parent_msg: MsgId::root(),
             this_msg: msg_id(1),
-            payload: Inscription::new_unchecked(vec![1]),
+            payload: [1].into(),
             signer: Some(test_signer()),
         };
         state.process_block(
@@ -4050,7 +4017,7 @@ mod tests {
             tx_hash: c1_tx_hash,
             parent_msg: MsgId::root(),
             this_msg: c1_msg,
-            payload: Inscription::new_unchecked(vec![99]),
+            payload: [99].into(),
             signer: Some(test_signer()),
         };
         // Mirror the observed inscription into pending before the safe-set
@@ -4060,7 +4027,7 @@ mod tests {
             c1_tx,
             MsgId::root(),
             c1_msg,
-            Inscription::new_unchecked(vec![99]),
+            [99].into(),
             PendingBundle::Plain,
         );
         state.process_block(
@@ -4124,12 +4091,8 @@ mod tests {
 
         let b1_msg = msg_id(10);
         let b1_hash = submit_fake_inscription(&mut state, 1, MsgId::root(), b1_msg);
-        let refused = state.submit_inscription(
-            make_dummy_tx(4),
-            MsgId::root(),
-            msg_id(30),
-            Inscription::new_unchecked(vec![4]),
-        );
+        let refused =
+            state.submit_inscription(make_dummy_tx(4), MsgId::root(), msg_id(30), [4].into());
         assert_eq!(
             refused,
             Err(ParentTaken {
@@ -4179,7 +4142,7 @@ mod tests {
             tx_hash: make_dummy_tx(99).hash(),
             parent_msg: MsgId::root(),
             this_msg: c1_msg,
-            payload: Inscription::new_unchecked(vec![99]),
+            payload: [99].into(),
             signer: Some(test_signer()),
         };
         state.process_block(

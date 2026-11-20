@@ -1,4 +1,4 @@
-use std::{collections::HashSet, num::NonZero, sync::Arc};
+use std::{collections::HashSet, sync::Arc};
 
 use lb_core::{
     header::HeaderId,
@@ -11,13 +11,13 @@ use lb_core::{
             channel::{
                 MsgId, UnverifiedChannelKeys, VerifiedChannelKeys,
                 config::ChannelConfigOp,
-                deposit::{DepositOp, Metadata},
+                deposit::DepositOp,
                 inscribe::{Inscription, InscriptionOp},
                 withdraw::ChannelWithdrawOp,
             },
         },
         traits::Hashable as _,
-        transactions::{OpProofs, Ops, TxList, states::Unverified},
+        transactions::{OpProofs, Ops, states::Unverified},
     },
 };
 use lb_key_management_system_service::keys::{Ed25519Key, ZkKey};
@@ -36,8 +36,8 @@ use super::{
     *,
 };
 use crate::test_support::{
-    FORK_DIGEST, MockNode, StreamEnd, StreamScript, api_block, funding_config, header_id,
-    inscribe_op, live_event, scripts, single_key_channel_state, unverified_tx_with_ops,
+    MockNode, StreamEnd, StreamScript, api_block, funding_config, header_id, inscribe_op,
+    live_event, scripts, single_key_channel_state, unverified_tx_with_ops,
 };
 
 #[must_use]
@@ -75,15 +75,15 @@ async fn prepare_submit_deposit_and_inscription() {
     let deposit_op = DepositOp {
         channel_id,
         inputs: BoundedInputs::from(utxo.id()).into(),
-        metadata: Metadata::new_unchecked(b"to Alice".to_vec()),
+        metadata: b"to Alice".into(),
     };
 
     // Build a `MantleTx` via the handle
     let (tx, msg_id, inscription_sig) = sequencer
         .handle()
         .prepare_tx(
-            Ops::new(FORK_DIGEST, [Op::ChannelDeposit(deposit_op.clone())]),
-            Inscription::new_unchecked(b"Mint 10 to Alice".to_vec()),
+            [Op::ChannelDeposit(deposit_op.clone())].into(),
+            b"Mint 10 to Alice".into(),
         )
         .unwrap();
     assert_eq!(tx.inner().len(), 2);
@@ -138,10 +138,7 @@ async fn submit_signed_tx_refuses_a_parent_with_a_pending_child() {
 
     let (tx, msg_id, inscription_sig) = sequencer
         .handle()
-        .prepare_tx(
-            Ops::new(FORK_DIGEST, TxList::new_unchecked(Vec::new())),
-            Inscription::new_unchecked(b"prepared first".to_vec()),
-        )
+        .prepare_tx(Ops::new_unchecked(Vec::new()), b"prepared first".into())
         .unwrap();
     let signed_tx =
         SignedOps::from_parts(tx, OpProofs::from([OpProof::Ed25519Sig(inscription_sig)]))
@@ -149,7 +146,7 @@ async fn submit_signed_tx_refuses_a_parent_with_a_pending_child() {
 
     sequencer
         .handle()
-        .publish(Inscription::new_unchecked(b"published in between".to_vec()))
+        .publish(b"published in between".into())
         .await
         .unwrap();
 
@@ -226,17 +223,14 @@ async fn submit_signed_tx_refuses_an_unknown_config_parent() {
     let channel_id = ChannelId::from([0; 32]);
     let key = Ed25519Key::from_bytes(&[0; 32]);
     let mut sequencer = ready_sequencer_with_channel(None, key.clone()).await;
-    let config_on = |parent: MsgId| {
-        ChannelConfigOp::new(
-            channel_id,
-            parent,
-            VerifiedChannelKeys::try_from(vec![key.public_key()]).unwrap(),
-            SlotTimeframe::from(0u32),
-            SlotTimeout::from(0u32),
-            NonZero::<u16>::MIN,
-            NonZero::<u16>::MIN,
-        )
-        .unwrap()
+    let config_on = |parent: MsgId| ChannelConfigOp {
+        channel: channel_id,
+        parent,
+        keys: VerifiedChannelKeys::try_from(vec![key.public_key()]).unwrap(),
+        posting_timeframe: SlotTimeframe::from(0u32),
+        posting_timeout: SlotTimeout::from(0u32),
+        configuration_threshold: 1,
+        transfer_threshold: 1,
     };
     let tip = sequencer.compute_publish_parent();
 
@@ -301,7 +295,7 @@ async fn gap_deposits_surface_after_a_failed_backfill_and_a_fork_switch() {
         let op = DepositOp {
             channel_id,
             inputs: BoundedInputs::from(NoteId::from(Fr::from(n))).into(),
-            metadata: Metadata::new_unchecked(vec![u8::try_from(n).unwrap()]),
+            metadata: Metadata::try_from(vec![u8::try_from(n).unwrap()]).unwrap(),
         };
         let tx = unverified_tx_with_ops(vec![Op::ChannelDeposit(op.clone())]);
         let note = DepositNote {
@@ -458,7 +452,7 @@ async fn drive_stale_publish(
             break;
         }
     }
-    let publish = client.publish(Inscription::new_unchecked(b"stale".to_vec()));
+    let publish = client.publish(b"stale".into());
     tokio::select! {
         result = publish => drop(result.expect("publish is accepted after Ready")),
         () = async { loop { drop(sequencer.next_event().await); } } => unreachable!(),
@@ -530,7 +524,7 @@ async fn funding_record_survives_a_checkpoint_round_trip() {
             break;
         }
     }
-    let publish = client.publish(Inscription::new_unchecked(b"restored".to_vec()));
+    let publish = client.publish(b"restored".into());
     let (result, checkpoint) = tokio::select! {
         result = publish => result.expect("publish is accepted after Ready"),
         () = async { loop { drop(sequencer.next_event().await); } } => unreachable!(),
@@ -788,7 +782,7 @@ async fn client_publish_fails_fast_during_reconnect_and_recovers() {
     // `wait_reconnect_delay` while the node is still down. With the old
     // behavior the request would never be drained during reconnect and this
     // would hang (caught by the timeout).
-    let publish = client.publish(Inscription::new_unchecked(b"during-reconnect".to_vec()));
+    let publish = client.publish(b"during-reconnect".into());
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         tokio::select! {
             result = publish => result,
@@ -815,7 +809,7 @@ async fn client_publish_fails_fast_during_reconnect_and_recovers() {
     .expect("Ready should be re-announced after reconnect");
 
     // Publishing works again and the inscription is posted.
-    let publish = client.publish(Inscription::new_unchecked(b"after-reconnect".to_vec()));
+    let publish = client.publish(b"after-reconnect".into());
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         tokio::select! {
             result = publish => result,
@@ -967,11 +961,11 @@ async fn assert_turns_alternate_without_blocks(posting_timeframe: u32, posting_t
     channel.posting_timeout = posting_timeout.into();
     let node = MockNode {
         channel_state: Some(channel),
-        slot_duration: core::time::Duration::from_millis(100),
+        slot_duration_ms: 100,
         ..MockNode::default()
     };
     let config = SequencerConfig {
-        resubmit_interval: core::time::Duration::from_secs(600),
+        resubmit_interval: std::time::Duration::from_secs(600),
         ..SequencerConfig::new(funding_config())
     };
     let mut sequencer =
@@ -1014,7 +1008,7 @@ async fn turn_notification_closes_with_the_publish_margin() {
     channel.posting_timeframe = 4u32.into();
     let node = MockNode {
         channel_state: Some(channel),
-        slot_duration: core::time::Duration::from_millis(300),
+        slot_duration_ms: 300,
         ..MockNode::default()
     };
     let config = SequencerConfig {
@@ -1089,20 +1083,19 @@ async fn publish_after_bundle_chains_on_the_bundle_inscription_tip() {
 
     let inscribe = InscriptionOp {
         channel_id,
-        inscription: Inscription::new_unchecked(b"bundle".to_vec()),
+        inscription: b"bundle".to_vec().try_into().unwrap(),
         parent: MsgId::root(),
         signer: sequencer_key.public_key().into_unverified(),
     };
-    let config = ChannelConfigOp::new(
-        channel_id,
-        MsgId::root(),
-        VerifiedChannelKeys::try_from(vec![sequencer_key.public_key()]).unwrap(),
-        SlotTimeframe::from(0u32),
-        SlotTimeout::from(0u32),
-        NonZero::<u16>::MIN,
-        NonZero::<u16>::MIN,
-    )
-    .unwrap();
+    let config = ChannelConfigOp {
+        channel: channel_id,
+        parent: MsgId::root(),
+        keys: VerifiedChannelKeys::try_from(vec![sequencer_key.public_key()]).unwrap(),
+        posting_timeframe: SlotTimeframe::from(0u32),
+        posting_timeout: SlotTimeout::from(0u32),
+        configuration_threshold: 1,
+        transfer_threshold: 1,
+    };
     let inscribe_msg = inscribe.id();
     let bundle = unverified_tx_with_ops(vec![
         Op::ChannelInscribe(inscribe),
@@ -1121,7 +1114,7 @@ async fn publish_after_bundle_chains_on_the_bundle_inscription_tip() {
 
     let (published, _cp) = sequencer
         .handle()
-        .publish(Inscription::new_unchecked(b"after-bundle".to_vec()))
+        .publish(b"after-bundle".into())
         .await
         .expect("publish after bundle should be accepted");
     assert_eq!(
@@ -1136,16 +1129,16 @@ async fn config_only_block_orphans_pending_inscription_but_keeps_message_tip() {
     let channel_id = ChannelId::from([0; 32]);
     let sequencer_key = Ed25519Key::from_bytes(&[0; 32]);
 
-    let config_op = ChannelConfigOp::new(
-        channel_id,
-        MsgId::root(),
-        VerifiedChannelKeys::try_from(vec![Ed25519Key::from_bytes(&[0; 32]).public_key()]).unwrap(),
-        SlotTimeframe::from(0u32),
-        SlotTimeout::from(0u32),
-        NonZero::<u16>::MIN,
-        NonZero::<u16>::MIN,
-    )
-    .unwrap();
+    let config_op = ChannelConfigOp {
+        channel: channel_id,
+        parent: MsgId::root(),
+        keys: VerifiedChannelKeys::try_from(vec![Ed25519Key::from_bytes(&[0; 32]).public_key()])
+            .unwrap(),
+        posting_timeframe: SlotTimeframe::from(0u32),
+        posting_timeout: SlotTimeout::from(0u32),
+        configuration_threshold: 1,
+        transfer_threshold: 1,
+    };
     let config_tx = unverified_tx_with_ops(vec![Op::ChannelConfig(config_op)]);
     let config_hash = config_tx.hash();
     let config_block = api_block(2, 1, 2, vec![config_tx]);
@@ -1182,7 +1175,7 @@ async fn config_only_block_orphans_pending_inscription_but_keeps_message_tip() {
         }
     }
 
-    let publish = client.publish(Inscription::new_unchecked(b"survives-config".to_vec()));
+    let publish = client.publish(b"survives-config".into());
     let (result, _checkpoint) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         tokio::select! {
             result = publish => result,
@@ -1261,19 +1254,16 @@ fn track_pending_tx_classifies_atomic_bundle_with_withdraws() {
     };
     let inscribe_op = InscriptionOp {
         channel_id,
-        inscription: Inscription::new_unchecked(b"hello".to_vec()),
+        inscription: Inscription::try_from(b"hello".to_vec()).unwrap(),
         parent: MsgId::root(),
         signer: Ed25519Key::from_bytes(&[0; 32])
             .public_key()
             .into_unverified(),
     };
-    let mantle_tx = Ops::new(
-        FORK_DIGEST,
-        [
-            Op::ChannelWithdraw(withdraw_op.clone()),
-            Op::ChannelInscribe(inscribe_op),
-        ],
-    );
+    let mantle_tx = Ops::from([
+        Op::ChannelWithdraw(withdraw_op.clone()),
+        Op::ChannelInscribe(inscribe_op),
+    ]);
     let tx_hash = mantle_tx.hash();
     let signed_tx = SignedOps::from_ops_with_sample_proofs(mantle_tx);
 
@@ -1300,13 +1290,13 @@ fn track_pending_tx_classifies_plain_inscription_with_none_withdraws() {
     let channel_id = ChannelId::from([2u8; 32]);
     let inscribe_op = InscriptionOp {
         channel_id,
-        inscription: Inscription::new_unchecked(b"hello".to_vec()),
+        inscription: Inscription::try_from(b"hello".to_vec()).unwrap(),
         parent: MsgId::root(),
         signer: Ed25519Key::from_bytes(&[0; 32])
             .public_key()
             .into_unverified(),
     };
-    let mantle_tx = Ops::new(FORK_DIGEST, [Op::ChannelInscribe(inscribe_op)]);
+    let mantle_tx = Ops::from([Op::ChannelInscribe(inscribe_op)]);
     let tx_hash = mantle_tx.hash();
     let signed_tx = SignedOps::from_ops_with_sample_proofs(mantle_tx);
 
@@ -1327,13 +1317,13 @@ fn track_pending_tx_falls_back_to_other_when_no_inscribe_for_channel() {
     let other_channel = ChannelId::from([4u8; 32]);
     let inscribe_op = InscriptionOp {
         channel_id: other_channel,
-        inscription: Inscription::new_unchecked(b"hello".to_vec()),
+        inscription: Inscription::try_from(b"hello".to_vec()).unwrap(),
         parent: MsgId::root(),
         signer: Ed25519Key::from_bytes(&[0; 32])
             .public_key()
             .into_unverified(),
     };
-    let mantle_tx = Ops::new(FORK_DIGEST, [Op::ChannelInscribe(inscribe_op)]);
+    let mantle_tx = Ops::from([Op::ChannelInscribe(inscribe_op)]);
     let tx_hash = mantle_tx.hash();
     let signed_tx = SignedOps::from_ops_with_sample_proofs(mantle_tx);
 
@@ -1387,7 +1377,7 @@ async fn cold_start_backfills_genesis_slot() {
     let deposit = DepositOp {
         channel_id,
         inputs: BoundedInputs::from(NoteId::from(Fr::from(1u64))).into(),
-        metadata: Metadata::new_unchecked(vec![1u8]),
+        metadata: Metadata::try_from(vec![1u8]).unwrap(),
     };
     let deposit_tx = unverified_tx_with_ops(vec![Op::ChannelDeposit(deposit.clone())]);
     let note_id = NoteId::from(Fr::from(1001u64));
@@ -1474,17 +1464,14 @@ async fn cold_start_backfill_finalizes_configs_with_their_keys() {
     let channel_id = ChannelId::from([7; 32]);
     let sequencer_key = Ed25519Key::from_bytes(&[0; 32]);
     let peer_key = Ed25519Key::from_bytes(&[1; 32]);
-    let config = |parent: MsgId, keys: Vec<_>| {
-        ChannelConfigOp::new(
-            channel_id,
-            parent,
-            VerifiedChannelKeys::try_from(keys).unwrap(),
-            SlotTimeframe::from(3u32),
-            SlotTimeout::from(0u32),
-            NonZero::<u16>::MIN,
-            NonZero::<u16>::MIN,
-        )
-        .unwrap()
+    let config = |parent: MsgId, keys: Vec<_>| ChannelConfigOp {
+        channel: channel_id,
+        parent,
+        keys: VerifiedChannelKeys::try_from(keys).unwrap(),
+        posting_timeframe: SlotTimeframe::from(3u32),
+        posting_timeout: SlotTimeout::from(0u32),
+        configuration_threshold: 1,
+        transfer_threshold: 1,
     };
     let accredit = config(
         MsgId::root(),
@@ -1547,7 +1534,7 @@ async fn cold_start_backfill_finalizes_configs_with_their_keys() {
         configs[0].config, accredit,
         "the mined config, keys included"
     );
-    assert_eq!(configs[0].config.keys().len(), 2);
+    assert_eq!(configs[0].config.keys.len(), 2);
     assert_eq!(configs[1].tx_hash, remove_tx.hash());
     assert_eq!(configs[1].parent_msg, accredit.id());
     assert_eq!(configs[1].this_msg, remove.id());
@@ -1555,7 +1542,7 @@ async fn cold_start_backfill_finalizes_configs_with_their_keys() {
         configs[1].config, remove,
         "the removal, with the one key left"
     );
-    assert_eq!(configs[1].config.keys().len(), 1);
+    assert_eq!(configs[1].config.keys.len(), 1);
 }
 
 /// Cold start over finalized history that is empty but for a block at
@@ -1730,16 +1717,16 @@ async fn resume_backfill_refines_finalized_config_from_a_replayed_config() {
     let sequencer_key = Ed25519Key::from_bytes(&[0; 32]);
 
     // A pure config sits in the finalized history the backfill replays.
-    let config_op = ChannelConfigOp::new(
-        channel_id,
-        MsgId::root(),
-        VerifiedChannelKeys::try_from(vec![Ed25519Key::from_bytes(&[0; 32]).public_key()]).unwrap(),
-        SlotTimeframe::from(0u32),
-        SlotTimeout::from(0u32),
-        NonZero::<u16>::MIN,
-        NonZero::<u16>::MIN,
-    )
-    .unwrap();
+    let config_op = ChannelConfigOp {
+        channel: channel_id,
+        parent: MsgId::root(),
+        keys: VerifiedChannelKeys::try_from(vec![Ed25519Key::from_bytes(&[0; 32]).public_key()])
+            .unwrap(),
+        posting_timeframe: SlotTimeframe::from(0u32),
+        posting_timeout: SlotTimeout::from(0u32),
+        configuration_threshold: 1,
+        transfer_threshold: 1,
+    };
     let config_id = config_op.id();
     let config_tx = unverified_tx_with_ops(vec![Op::ChannelConfig(config_op)]);
     // The config finalized during downtime at slot 1 — above the checkpoint
@@ -2341,7 +2328,7 @@ async fn channel_config_signs_with_own_current_accredited_index() {
         .expect("config update from an accredited non-leading key must build");
 
     assert_eq!(
-        config_op_of(&signed_ops).parent(),
+        config_op_of(&signed_ops).parent,
         MsgId::root(),
         "parent must equal the channel's config tip"
     );
@@ -2393,7 +2380,7 @@ async fn channel_config_on_unclaimed_channel_carries_empty_proof() {
     };
     assert!(proof.signatures().is_empty());
     assert_eq!(
-        config_op_of(&signed_ops).parent(),
+        config_op_of(&signed_ops).parent,
         MsgId::root(),
         "claiming an unclaimed channel must be rooted at ZERO"
     );
@@ -2423,36 +2410,6 @@ async fn channel_config_fails_when_not_accredited() {
         error.to_string().contains("accredited"),
         "unexpected error: {error}"
     );
-}
-
-/// A config the ledger would reject (a zero threshold, or a configuration
-/// threshold above the key count) fails locally, before it is funded.
-#[tokio::test]
-async fn channel_config_rejects_an_ill_formed_config() {
-    let own_key = Ed25519Key::from_bytes(&[7; 32]);
-    let mut sequencer = ready_sequencer_with_channel(None, own_key.clone()).await;
-
-    for (configuration_threshold, transfer_threshold, reason) in [
-        (2, 1, "exceeds the 1 accredited keys"),
-        (0, 1, "configuration_threshold must be at least 1"),
-        (1, 0, "transfer_threshold must be at least 1"),
-    ] {
-        let error = sequencer
-            .handle()
-            .channel_config(
-                VerifiedChannelKeys::new_unchecked(vec![own_key.public_key()]),
-                SlotTimeframe::from(0u32),
-                SlotTimeout::from(0u32),
-                configuration_threshold,
-                transfer_threshold,
-            )
-            .await
-            .expect_err("an ill-formed config must fail locally");
-        assert!(
-            error.to_string().contains(reason),
-            "unexpected error: {error}"
-        );
-    }
 }
 
 /// `configuration_threshold > 1` needs signatures the sequencer cannot
@@ -2522,7 +2479,7 @@ async fn submit_atomic_bundle_rejects_a_bundle_prepared_by_another_sequencer() {
 
     let sign_payload = vec![0xab; 32];
     let bundle_by = |preparer: &Ed25519Key| PreparedAtomicBundle {
-        tx: Ops::new(FORK_DIGEST, TxList::new_unchecked(Vec::new())),
+        tx: Ops::new_unchecked(Vec::new()),
         transfer_proof: None,
         pre_fund: MantleTxBuilder::new(),
         inscribe_sig: preparer.sign_payload(&sign_payload),
@@ -2614,7 +2571,7 @@ async fn a_second_config_on_a_pending_config_position_is_refused() {
         .await;
 
     assert_eq!(
-        config_op_of(&first_tx).parent(),
+        config_op_of(&first_tx).parent,
         MsgId::root(),
         "the config claiming an unclaimed channel must be rooted at ZERO"
     );
