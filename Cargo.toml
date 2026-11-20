@@ -25,21 +25,21 @@ cucumber                         = { default-features = false, version = "=0.23.
 flate2                           = { default-features = false, version = "1.1.9" }
 futures                          = { default-features = false, version = "0.3.32" }
 hex                              = { default-features = false, version = "0.4" }
-lb-binary-codec                  = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-binary-codec", rev = "cba1fea86ff54c9df1a332cdc6c5c60d5fc8cf4f" }
-lb-common-http-client            = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-common-http-client", rev = "cba1fea86ff54c9df1a332cdc6c5c60d5fc8cf4f" }
-lb-core                          = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-core", rev = "cba1fea86ff54c9df1a332cdc6c5c60d5fc8cf4f" }
-lb-groth16                       = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-groth16", rev = "cba1fea86ff54c9df1a332cdc6c5c60d5fc8cf4f" }
-lb-http-api-common               = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-http-api-common", rev = "cba1fea86ff54c9df1a332cdc6c5c60d5fc8cf4f" }
-lb-key-management-system-service = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-key-management-system-service", rev = "cba1fea86ff54c9df1a332cdc6c5c60d5fc8cf4f" }
-lb-log-targets                   = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-log-targets", rev = "cba1fea86ff54c9df1a332cdc6c5c60d5fc8cf4f" }
-lb-mmr                           = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-mmr", rev = "cba1fea86ff54c9df1a332cdc6c5c60d5fc8cf4f" }
-lb-program-spend                 = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-program-spend", rev = "cba1fea86ff54c9df1a332cdc6c5c60d5fc8cf4f" }
-lb-testing-framework             = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "blockchain-test-logos", rev = "cba1fea86ff54c9df1a332cdc6c5c60d5fc8cf4f" }
-lb-time                          = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-time", rev = "cba1fea86ff54c9df1a332cdc6c5c60d5fc8cf4f" }
-lb-utils                         = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-utils", rev = "cba1fea86ff54c9df1a332cdc6c5c60d5fc8cf4f" }
-lb-wallet                        = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-wallet", rev = "cba1fea86ff54c9df1a332cdc6c5c60d5fc8cf4f" }
+lb-binary-codec                  = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-binary-codec", rev = "f08cbf14e14d3da86c717a61658836bd5d49e3ce" }
+lb-common-http-client            = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-common-http-client", rev = "f08cbf14e14d3da86c717a61658836bd5d49e3ce" }
+lb-core                          = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-core", rev = "f08cbf14e14d3da86c717a61658836bd5d49e3ce" }
+lb-groth16                       = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-groth16", rev = "f08cbf14e14d3da86c717a61658836bd5d49e3ce" }
+lb-http-api-common               = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-http-api-common", rev = "f08cbf14e14d3da86c717a61658836bd5d49e3ce" }
+lb-key-management-system-service = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-key-management-system-service", rev = "f08cbf14e14d3da86c717a61658836bd5d49e3ce" }
+lb-log-targets                   = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-log-targets", rev = "f08cbf14e14d3da86c717a61658836bd5d49e3ce" }
+lb-mmr                           = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-mmr", rev = "f08cbf14e14d3da86c717a61658836bd5d49e3ce" }
+lb-program-spend                 = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-program-spend", rev = "f08cbf14e14d3da86c717a61658836bd5d49e3ce" }
+lb-testing-framework             = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "blockchain-test-logos", rev = "f08cbf14e14d3da86c717a61658836bd5d49e3ce" }
+lb-time                          = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-time", rev = "f08cbf14e14d3da86c717a61658836bd5d49e3ce" }
+lb-utils                         = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-utils", rev = "f08cbf14e14d3da86c717a61658836bd5d49e3ce" }
+lb-wallet                        = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-wallet", rev = "f08cbf14e14d3da86c717a61658836bd5d49e3ce" }
 lb-zone-sdk                      = { default-features = false, package = "logos-blockchain-zone-sdk", path = "zone-sdk" }
-logos-blockchain-tests           = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", rev = "cba1fea86ff54c9df1a332cdc6c5c60d5fc8cf4f" }
+logos-blockchain-tests           = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", rev = "f08cbf14e14d3da86c717a61658836bd5d49e3ce" }
 logos-blockchain-zone-tests      = { default-features = false, path = "tests/zone-sdk" }
 rand                             = { default-features = false, version = "0.8" }
 reqwest                          = { default-features = false, version = "0.12" }
