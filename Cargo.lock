@@ -5034,6 +5034,7 @@ dependencies = [
  "logos-blockchain-mmr",
  "logos-blockchain-program-spend",
  "logos-blockchain-time",
+ "logos-blockchain-wallet",
  "reqwest 0.12.28",
  "rpds",
  "serde",

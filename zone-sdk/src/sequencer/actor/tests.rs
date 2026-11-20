@@ -2596,7 +2596,7 @@ async fn a_checkpoint_without_program_notes_rebuilds_the_set_from_the_finalized_
 }
 
 /// A program inscription prepared at the tip spends the program notes the
-/// sequencer tracks `PROGRAM_SPEND_ROOT_DEPTH` blocks below it, its first
+/// sequencer tracks `SPEND_ROOT_DEPTH` blocks below it, its first
 /// mini-block proven against the root on chain, and once submitted its
 /// inputs leave the notes a next step may consume.
 #[tokio::test]
@@ -2618,11 +2618,11 @@ async fn prepare_program_inscription_spends_the_tracked_notes_and_submits() {
         },
     };
     use lb_key_management_system_service::keys::ZkPublicKey;
+    use lb_wallet::SPEND_ROOT_DEPTH;
 
     use crate::{
         sequencer::{
             ProgramStepSpec, StepSpec, UserOutput,
-            block_states::PROGRAM_SPEND_ROOT_DEPTH,
             program_notes::fixtures::{foreign, program, sample_opening},
         },
         test_support::{inscribe_op, unverified_tx_with_ops},
@@ -2655,7 +2655,7 @@ async fn prepare_program_inscription_spends_the_tracked_notes_and_submits() {
         },
     )));
     // B1 creates the note; the empty blocks after it bring it to spend depth.
-    let blocks: Vec<_> = (2..=1 + PROGRAM_SPEND_ROOT_DEPTH as u8)
+    let blocks: Vec<_> = (2..=1 + SPEND_ROOT_DEPTH as u8)
         .map(|n| api_block(n, n - 1, u64::from(n), vec![]))
         .collect();
     let (mut node, _posted) = MockNode::with_posted_channel();

@@ -37,6 +37,7 @@ lb-program-spend                 = { default-features = false, git = "https://gi
 lb-testing-framework             = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "blockchain-test-logos", rev = "767cf967b23b471869a7cae4cb5a6fa54f9389ac" }
 lb-time                          = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-time", rev = "767cf967b23b471869a7cae4cb5a6fa54f9389ac" }
 lb-utils                         = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-utils", rev = "767cf967b23b471869a7cae4cb5a6fa54f9389ac" }
+lb-wallet                        = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-wallet", rev = "767cf967b23b471869a7cae4cb5a6fa54f9389ac" }
 lb-zone-sdk                      = { default-features = false, package = "logos-blockchain-zone-sdk", path = "zone-sdk" }
 logos-blockchain-tests           = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", rev = "767cf967b23b471869a7cae4cb5a6fa54f9389ac" }
 logos-blockchain-zone-tests      = { default-features = false, path = "tests/zone-sdk" }

@@ -829,10 +829,9 @@ where
 
     /// Builds the inscription of `data` with `mini_blocks` on the current
     /// publish tip, its program steps spending the channel's program notes
-    /// at the root they name: the set
-    /// [`PROGRAM_SPEND_ROOT_DEPTH`](super::block_states::PROGRAM_SPEND_ROOT_DEPTH)
-    /// blocks below the tip, minus what the pending inscriptions already
-    /// spend.
+    /// at the root they name: the set [`lb_wallet::SPEND_ROOT_DEPTH`] blocks
+    /// below the tip, as every wallet spend, minus what the pending
+    /// inscriptions already spend.
     pub(super) fn do_prepare_program_inscription(
         &self,
         data: Inscription,
