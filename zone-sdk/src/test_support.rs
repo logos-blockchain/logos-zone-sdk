@@ -18,13 +18,14 @@ use lb_common_http_client::{
 use lb_core::{
     crypto::Hash,
     era::ForkDigest,
-    events::{Event as ChainEvent, TxEvent, TxEventPayload},
+    events::{BlockEvent, Event as ChainEvent, TxEvent, TxEventPayload},
     header::{ContentId, HeaderId},
     mantle::{
         Op, SignedOps,
         channel::ChannelState,
         gas::GasCost,
         ledger::verification_mode::StandardMode,
+        note_set::{NoteSetIndex, NoteSetUpdate},
         ops::{
             OpId as _,
             channel::{
@@ -471,16 +472,27 @@ pub fn inscribe_op(channel_id: ChannelId, parent: MsgId, payload: &[u8]) -> Insc
 }
 
 /// A `Deposit` block event matching `op` inside `tx`, with its outputs.
+/// The events a node emits for a deposit: the deposit event of its op and
+/// the update of the channel's note set it appends to.
 pub fn deposit_event(tx: &SignedOps<Unverified, StandardMode>, op: &DepositOp) -> Events {
-    Events::from(ChainEvent::Tx(TxEvent::new(
-        tx.hash(),
-        op.op_id(),
-        TxEventPayload::Deposit {
-            channel_id: op.channel_id,
-            metadata: op.metadata.clone(),
-            outputs: op.outputs.clone(),
-        },
-    )))
+    [
+        ChainEvent::Tx(TxEvent::new(
+            tx.hash(),
+            op.op_id(),
+            TxEventPayload::Deposit {
+                channel_id: op.channel_id,
+                metadata: op.metadata.clone(),
+                outputs: op.outputs.clone(),
+            },
+        )),
+        ChainEvent::Block(BlockEvent::NoteSetUpdated(NoteSetUpdate {
+            note_set: NoteSetIndex::Channel(op.channel_id),
+            nullifiers: op.inputs.iter().copied().collect(),
+            commitments: op.outputs.iter().copied().collect(),
+        })),
+    ]
+    .into_iter()
+    .collect()
 }
 
 /// The deposit op ids among `observed`, in order.

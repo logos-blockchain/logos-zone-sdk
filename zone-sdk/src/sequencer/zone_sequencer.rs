@@ -33,6 +33,7 @@ use tracing::{debug, info, warn};
 
 use super::{
     TARGET,
+    backfill::NoteSetRebuild,
     block_fetch::{channel_configs, channel_inscriptions, classify_channel_tx},
     block_states::{ChannelTxKind, SharedTx},
     client::SequencerClient,
@@ -47,8 +48,9 @@ use super::{
     },
     types::{
         ChannelUpdateTx, Error, Event, FundingConfig, InscriptionInfo, PendingTx,
-        PreparedChannelConfig, ProgramRegisterInfo, PublishResult, SequencerChannelView,
-        SequencerCheckpoint, SequencerConfig, TurnNotification,
+        PreparedChannelConfig, ProgramNotesCheckpoint, ProgramNotesView, ProgramRegisterInfo,
+        PublishResult, SequencerChannelView, SequencerCheckpoint, SequencerConfig,
+        TurnNotification,
     },
 };
 use crate::{InscriptionSteps, adapter, adapter::BoxStream, inscribes};
@@ -142,6 +144,9 @@ pub struct ZoneSequencer<Node> {
     // otherwise either skip or re-process genesis depending on which side
     // of `+1` we picked.
     pub(super) backfill_from_genesis: bool,
+    /// The rebuild of the channel's note set a checkpoint without one
+    /// needs, until it completes.
+    pub(super) note_set_rebuild: Option<NoteSetRebuild>,
 
     // Broadcast channel for events — late subscribers receive future events.
     pub(super) event_tx: broadcast::Sender<Event>,
@@ -223,6 +228,9 @@ pub(super) enum ActorRequest {
         tx: Ops,
         response_tx: oneshot::Sender<Result<Ed25519Signature, Error>>,
     },
+    ProgramNotes {
+        response_tx: oneshot::Sender<ProgramNotesView>,
+    },
 }
 
 impl<Node> ZoneSequencer<Node>
@@ -259,36 +267,45 @@ where
         config: SequencerConfig,
         checkpoint: Option<SequencerCheckpoint>,
     ) -> Self {
-        let (state, lib_slot, last_msg_id, backfill_from_genesis) = if let Some(cp) = checkpoint {
-            info!(target: TARGET,
-                "Restoring from checkpoint: {} pending txs, lib={:?}, lib_slot={:?}",
-                cp.pending_txs.len(),
-                cp.lib,
-                cp.lib_slot
-            );
-            let SequencerCheckpoint {
-                last_msg_id,
-                pending_txs,
-                lib,
-                lib_slot,
-                finalized_config,
-                funding,
-            } = cp;
-            let finalized_msg =
-                restored_pending_channel_tip(&pending_txs, channel_id).unwrap_or(last_msg_id);
-            let mut tx_state = TxState::new(lib, finalized_msg);
-            tx_state.set_finalized_config(finalized_config);
-            for (hash, tx) in pending_txs {
-                if let Err(taken) = track_pending_tx(&mut tx_state, tx, channel_id) {
-                    warn!(target: TARGET, "Dropping checkpointed tx {hash:?}: {taken}");
+        let (state, lib_slot, last_msg_id, backfill_from_genesis, note_set_rebuild) =
+            if let Some(cp) = checkpoint {
+                info!(target: TARGET,
+                    "Restoring from checkpoint: {} pending txs, lib={:?}, lib_slot={:?}",
+                    cp.pending_txs.len(),
+                    cp.lib,
+                    cp.lib_slot
+                );
+                let SequencerCheckpoint {
+                    last_msg_id,
+                    pending_txs,
+                    lib,
+                    lib_slot,
+                    finalized_config,
+                    funding,
+                    program_notes,
+                } = cp;
+                let finalized_msg =
+                    restored_pending_channel_tip(&pending_txs, channel_id).unwrap_or(last_msg_id);
+                let mut tx_state = TxState::new(lib, finalized_msg);
+                tx_state.set_finalized_config(finalized_config);
+                let note_set_rebuild = restore_program_notes(&mut tx_state, program_notes);
+                for (hash, tx) in pending_txs {
+                    if let Err(taken) = track_pending_tx(&mut tx_state, tx, channel_id) {
+                        warn!(target: TARGET, "Dropping checkpointed tx {hash:?}: {taken}");
+                    }
                 }
-            }
-            tx_state.restore_fundings(funding);
-            (Some(tx_state), lib_slot, last_msg_id, false)
-        } else {
-            info!(target: TARGET, "Starting fresh (no checkpoint)");
-            (None, Slot::genesis(), MsgId::root(), true)
-        };
+                tx_state.restore_fundings(funding);
+                (
+                    Some(tx_state),
+                    lib_slot,
+                    last_msg_id,
+                    false,
+                    note_set_rebuild,
+                )
+            } else {
+                info!(target: TARGET, "Starting fresh (no checkpoint)");
+                (None, Slot::genesis(), MsgId::root(), true, None)
+            };
 
         let resubmit_interval = tokio::time::interval(config.resubmit_interval);
         let (event_tx, _) = broadcast::channel(256);
@@ -332,6 +349,7 @@ where
             backfill_from: None,
             backfill_to: None,
             backfill_from_genesis,
+            note_set_rebuild,
             event_tx,
             ready_tx,
             channel_view_tx,
@@ -409,6 +427,18 @@ where
     #[must_use]
     pub const fn is_connected(&self) -> bool {
         self.connected
+    }
+
+    /// The channel's program notes a new step may consume at the current
+    /// tip, with their paths against the view's root. Empty when no tip is
+    /// known yet.
+    #[must_use]
+    pub fn program_notes(&self) -> ProgramNotesView {
+        self.state
+            .as_ref()
+            .map_or_else(ProgramNotesView::empty, |state| {
+                state.program_notes(self.current_tip)
+            })
     }
 
     /// Current persistence checkpoint, if one has been produced.
@@ -690,6 +720,9 @@ where
             }
             ActorRequest::SignTx { tx, response_tx } => {
                 drop(response_tx.send(self.do_sign_tx(&tx)));
+            }
+            ActorRequest::ProgramNotes { response_tx } => {
+                drop(response_tx.send(self.program_notes()));
             }
         }
     }
@@ -1331,7 +1364,30 @@ pub(super) fn build_checkpoint(
         lib_slot,
         finalized_config: state.finalized_config(),
         funding: state.funding_records(),
+        program_notes: Some(state.finalized_program_notes()),
     }
+}
+
+/// Installs the checkpoint's finalized note set, or, for a checkpoint
+/// written before the set was tracked, asks for its rebuild from the
+/// finalized history.
+fn restore_program_notes(
+    state: &mut TxState,
+    checkpoint: Option<ProgramNotesCheckpoint>,
+) -> Option<NoteSetRebuild> {
+    checkpoint.map_or_else(
+        || {
+            info!(
+                target: TARGET,
+                "Checkpoint carries no program notes; rebuilding the channel's note set from the finalized history"
+            );
+            Some(NoteSetRebuild::default())
+        },
+        |notes| {
+            state.restore_finalized_program_notes(notes);
+            None
+        },
+    )
 }
 
 fn restored_pending_channel_tip(

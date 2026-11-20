@@ -31,7 +31,10 @@ use lb_log_targets::zone_sdk;
 use reqwest::Url;
 use tracing::error;
 
-use crate::{Deposit, InscriptionSteps, Withdraw, ZoneBlock, ZoneMessage, ops_with_proofs};
+use crate::{
+    Deposit, InscriptionSteps, Withdraw, ZoneBlock, ZoneMessage, ops_with_proofs,
+    sequencer::program_notes::{BlockNoteSet, program_notes_created, touches_note_set},
+};
 
 const TARGET: &str = zone_sdk::ADAPTER;
 
@@ -266,24 +269,47 @@ pub(crate) fn build_deposit_events(events: &Events) -> DepositEvents {
         .collect()
 }
 
+/// What a block's events say about our channel: its deposits, and what the
+/// block did to the channel's note set.
+pub(crate) struct ChannelBlockEvents {
+    pub deposits: DepositEvents,
+    pub note_set: Option<BlockNoteSet>,
+}
+
 /// Fetch the deposit-event lookup for a single block, gated on whether the
 /// block has any deposit op for our channel.
-///
-/// Per node semantics, a block and its events are atomically visible — so a
-/// block containing a deposit op must yield an event for that op. The
-/// returned `HashMap` is therefore the *complete* `(tx_hash, op_id) → event`
-/// lookup for every deposit op of our channel in this block.
-///
-/// On any failure (HTTP error, `Ok(None)`, or events missing an entry for
-/// some deposit op) we log at error level and return an error. The caller's
-/// contract is "either retry, or abandon this block" — never silently emit a
-/// partial result, because that drops real deposits.
 pub(crate) async fn fetch_block_deposit_events<N>(
     node: &N,
     block_id: HeaderId,
     transactions: &[SignedOps<Unverified, StandardMode>],
     channel_id: ChannelId,
 ) -> Result<DepositEvents, Error>
+where
+    N: Node + Sync + ?Sized,
+{
+    fetch_block_channel_events(node, block_id, transactions, channel_id)
+        .await
+        .map(|events| events.deposits)
+}
+
+/// Fetch a block's events when they can concern our channel: it has a
+/// deposit op for it, or an op that appends to the channel's note set.
+///
+/// Per node semantics, a block and its events are atomically visible — so a
+/// block containing a deposit op must yield an event for that op. The
+/// returned deposit lookup is therefore the *complete* `(tx_hash, op_id) →
+/// event` map for every deposit op of our channel in this block.
+///
+/// On any failure (HTTP error, `Ok(None)`, or events missing an entry for
+/// some deposit op) we log at error level and return an error. The caller's
+/// contract is "either retry, or abandon this block" — never silently emit a
+/// partial result, because that drops real deposits.
+pub(crate) async fn fetch_block_channel_events<N>(
+    node: &N,
+    block_id: HeaderId,
+    transactions: &[SignedOps<Unverified, StandardMode>],
+    channel_id: ChannelId,
+) -> Result<ChannelBlockEvents, Error>
 where
     N: Node + Sync + ?Sized,
 {
@@ -300,9 +326,14 @@ where
             })
         })
         .collect();
-
-    if expected.is_empty() {
-        return Ok(DepositEvents::new());
+    let note_set_touched = transactions
+        .iter()
+        .any(|tx| touches_note_set(tx, channel_id));
+    if expected.is_empty() && !note_set_touched {
+        return Ok(ChannelBlockEvents {
+            deposits: DepositEvents::new(),
+            note_set: None,
+        });
     }
 
     let events = match node.block_events(block_id).await {
@@ -311,11 +342,11 @@ where
             error!(
                 target: TARGET,
                 ?block_id,
-                "Events endpoint returned no body for a block with a channel deposit; \
+                "Events endpoint returned no body for a block with channel ops; \
                  events should be atomically visible with the block"
             );
             return Err(Error::Server(format!(
-                "no events for block {block_id} containing channel deposits"
+                "no events for block {block_id} containing channel ops"
             )));
         }
         Err(err) => {
@@ -324,9 +355,9 @@ where
         }
     };
 
-    let deposit_events = build_deposit_events(&events);
+    let deposits = build_deposit_events(&events);
     for key in &expected {
-        if !deposit_events.contains_key(key) {
+        if !deposits.contains_key(key) {
             error!(
                 target: TARGET,
                 ?block_id,
@@ -341,7 +372,39 @@ where
             )));
         }
     }
-    Ok(deposit_events)
+    let note_set = block_note_set(
+        &events,
+        transactions,
+        channel_id,
+        block_id,
+        note_set_touched,
+    )?;
+    Ok(ChannelBlockEvents { deposits, note_set })
+}
+
+/// What the block's events say the block did to the channel's note set. A
+/// block that appends to the set must come with its update.
+fn block_note_set(
+    events: &Events,
+    transactions: &[SignedOps<Unverified, StandardMode>],
+    channel_id: ChannelId,
+    block_id: HeaderId,
+    touched: bool,
+) -> Result<Option<BlockNoteSet>, Error> {
+    let created = program_notes_created(transactions, channel_id);
+    let note_set = BlockNoteSet::from_events(events, channel_id, created);
+    if touched && note_set.is_none() {
+        error!(
+            target: TARGET,
+            ?block_id,
+            "Block events missing the channel's note set update for a block that appends to it; \
+             expected atomic block/events visibility per node semantics"
+        );
+        return Err(Error::Server(format!(
+            "block {block_id} events missing the note set update of channel {channel_id:?}"
+        )));
+    }
+    Ok(note_set)
 }
 
 /// Walks a block's transactions and emits the [`ZoneMessage`]s relevant to

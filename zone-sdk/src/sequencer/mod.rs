@@ -66,12 +66,9 @@ mod actor;
 mod backfill;
 mod block_fetch;
 mod block_states;
-// TODO(private-utxo): successor derives program note ops from program steps
-// and selects the program notes a step consumes; the file is kept verbatim.
-#[cfg(any())]
-mod channel_wallet;
 mod client;
 mod handle;
+pub(crate) mod program_notes;
 mod slot_clock;
 mod state;
 mod tx_builder;

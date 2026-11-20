@@ -23,6 +23,7 @@ use tracing::{debug, error};
 use super::{
     TARGET,
     block_states::{BlockChannelTx, ChannelTxKind, SharedTx},
+    program_notes::BlockNoteSet,
     state::{ChannelUpdateInfo, Displaced, TxState},
     types::{
         ChannelUpdateTx, ConfigInfo, DepositInfo, Error, FinalizedOp, FinalizedTx, InscriptionInfo,
@@ -31,7 +32,7 @@ use super::{
 };
 use crate::{
     InscriptionSteps, adapter,
-    adapter::{DepositEvents, DepositOpKey},
+    adapter::{ChannelBlockEvents, DepositEvents, DepositOpKey},
     inscribes, ops_with_proofs,
 };
 
@@ -115,6 +116,8 @@ struct PreparedBlockEvent<'a> {
     channel_txs: Vec<BlockChannelTx>,
     /// Observed ops of the live block.
     observed: Vec<ObservedOp>,
+    /// What the live block did to the channel's note set.
+    note_set: Option<BlockNoteSet>,
 }
 
 /// A fetched block with what the apply phase needs from the node, so it
@@ -122,6 +125,7 @@ struct PreparedBlockEvent<'a> {
 struct BackfillBlock {
     block: ApiBlock,
     observed: Vec<ObservedOp>,
+    note_set: Option<BlockNoteSet>,
 }
 
 /// Process a block event. Returns finalized tx hashes and optional channel
@@ -144,13 +148,7 @@ where
 {
     let prepared = prepare_block_event(event, state.as_ref(), *lib_slot, channel_id, node).await?;
 
-    Ok(apply_prepared_block_event(
-        prepared,
-        state,
-        current_tip,
-        lib_slot,
-        channel_id,
-    ))
+    apply_prepared_block_event(prepared, state, current_tip, lib_slot, channel_id)
 }
 
 async fn prepare_block_event<'a, Node>(
@@ -194,9 +192,9 @@ where
     let our_txs = block_our_txs(&event.block.transactions, channel_id, &tracked);
     let channel_txs = classify_channel_txs(&event.block.transactions, channel_id);
 
-    // Deposit events for the live block: fetched here (the prepare phase) so
-    // the apply phase mutates state without any `.await`.
-    let deposit_events = fetch_block_deposit_events(
+    // The live block's events: fetched here (the prepare phase) so the apply
+    // phase mutates state without any `.await`.
+    let events = fetch_block_channel_events(
         node,
         event.block.header.id,
         &event.block.transactions,
@@ -207,7 +205,7 @@ where
         &event.block.transactions,
         channel_id,
         event.block.header.slot,
-        &deposit_events,
+        &events.deposits,
     );
 
     // The reported tip can be a block whose own event never reached us: the
@@ -242,6 +240,7 @@ where
         our_txs,
         channel_txs,
         observed,
+        note_set: events.note_set,
     })
 }
 
@@ -285,7 +284,7 @@ fn apply_prepared_block_event(
     current_tip: &mut Option<HeaderId>,
     lib_slot: &mut Slot,
     channel_id: ChannelId,
-) -> BlockEventResult {
+) -> Result<BlockEventResult, Error> {
     let PreparedBlockEvent {
         block,
         tip,
@@ -298,6 +297,7 @@ fn apply_prepared_block_event(
         our_txs,
         channel_txs,
         observed,
+        note_set,
     } = prepared;
 
     if state.is_none() {
@@ -316,7 +316,7 @@ fn apply_prepared_block_event(
 
     // Install finalized history first. It is not mirrored into pending: the
     // matching local entries are removed below using the returned hashes.
-    let finalized_batch = apply_finalized_blocks(s, finalized);
+    let finalized_batch = apply_finalized_blocks(s, finalized)?;
     if lib_advanced {
         *lib_slot = next_lib_slot;
     }
@@ -328,7 +328,7 @@ fn apply_prepared_block_event(
 
     let current_lib = s.lib();
     for backfill in canonical_backfill {
-        apply_backfilled_block(s, backfill, channel_id, current_lib);
+        apply_backfilled_block(s, backfill, channel_id, current_lib)?;
     }
 
     // Pending = canonical channel txs above LIB + our own unmined publishes:
@@ -346,13 +346,14 @@ fn apply_prepared_block_event(
         our_txs,
         channel_txs,
         observed,
-    );
+        note_set,
+    )?;
 
     // Then the reported tip's branch, which may build on the event block.
     // Like canonical backfill it is mirrored from the store below.
     let tip_lib = s.lib();
     for backfill in tip_backfill {
-        apply_backfilled_block(s, backfill, channel_id, tip_lib);
+        apply_backfilled_block(s, backfill, channel_id, tip_lib)?;
     }
 
     // Remove our pending txs that were finalized in the backfilled LIB blocks,
@@ -396,12 +397,12 @@ fn apply_prepared_block_event(
 
     let view_before = ViewBefore::new(&old_lineage, finalized_now);
 
-    BlockEventResult {
+    Ok(BlockEventResult {
         finalized_items: finalized_batch.items,
         channel_update,
         view_before,
         observed,
-    }
+    })
 }
 
 /// (Re-)mirror stored blocks now on the canonical path: arrived as a fork,
@@ -535,6 +536,7 @@ struct PreparedFinalizedBlock {
     our_txs: Vec<TxHash>,
     channel_txs: Vec<BlockChannelTx>,
     items: Vec<FinalizedTx>,
+    note_set: Option<BlockNoteSet>,
 }
 
 async fn prepare_finalized_blocks<Node>(
@@ -562,16 +564,16 @@ where
         let our_txs = block_our_txs(&block.transactions, channel_id, tracked);
         let channel_txs = classify_channel_txs(&block.transactions, channel_id);
 
-        // Fetch + validate deposit events for this block BEFORE mutating
-        // state — on error we leave state untouched so the caller can retry.
-        let deposit_events =
-            fetch_block_deposit_events(node, block.header.id, &block.transactions, channel_id)
+        // Fetch + validate the block's events BEFORE mutating state — on
+        // error we leave state untouched so the caller can retry.
+        let events =
+            fetch_block_channel_events(node, block.header.id, &block.transactions, channel_id)
                 .await?;
         let block_items = extract_finalized_items(
             &block.transactions,
             channel_id,
             block.header.slot,
-            &deposit_events,
+            &events.deposits,
         );
 
         prepared.push(PreparedFinalizedBlock {
@@ -580,6 +582,7 @@ where
             our_txs,
             channel_txs,
             items: block_items,
+            note_set: events.note_set,
         });
     }
 
@@ -589,7 +592,7 @@ where
 fn apply_finalized_blocks(
     state: &mut TxState,
     blocks: Vec<PreparedFinalizedBlock>,
-) -> FetchedBatch {
+) -> Result<FetchedBatch, Error> {
     let mut result = FetchedBatch {
         our_tx_hashes: Vec::new(),
         items: Vec::new(),
@@ -610,10 +613,11 @@ fn apply_finalized_blocks(
             block.our_txs,
             block.channel_txs,
             Vec::new(),
-        );
+            block.note_set,
+        )?;
     }
 
-    result
+    Ok(result)
 }
 
 /// The message and config ids `items` put on chain: what retires a pending
@@ -646,20 +650,50 @@ where
     let tracked = state.tracked_tx_hashes();
     let prepared = prepare_finalized_blocks(from_slot, to_slot, channel_id, &tracked, node).await?;
 
-    Ok(apply_finalized_blocks(state, prepared))
+    apply_finalized_blocks(state, prepared)
 }
 
-/// [`adapter::fetch_block_deposit_events`], failing with [`Error::Network`].
-async fn fetch_block_deposit_events<Node>(
+/// The channel's note set updates of the finalized blocks of the slot range,
+/// in block order: what rebuilds the set when a checkpoint carried none.
+pub(super) async fn fetch_note_set_updates<Node>(
+    from_slot: u64,
+    to_slot: u64,
+    channel_id: ChannelId,
+    node: &Node,
+) -> Result<Vec<BlockNoteSet>, Error>
+where
+    Node: adapter::Node + Sync,
+{
+    let blocks = node
+        .immutable_blocks(Slot::from(from_slot), Slot::from(to_slot))
+        .await
+        .map_err(|e| {
+            error!(target: TARGET, ?from_slot, ?to_slot, ?e, "Failed to fetch immutable blocks");
+            Error::Network(format!(
+                "failed to fetch blocks (slots {from_slot}..{to_slot}): {e}"
+            ))
+        })?;
+    let mut updates = Vec::new();
+    for block in blocks {
+        let events =
+            fetch_block_channel_events(node, block.header.id, &block.transactions, channel_id)
+                .await?;
+        updates.extend(events.note_set);
+    }
+    Ok(updates)
+}
+
+/// [`adapter::fetch_block_channel_events`], failing with [`Error::Network`].
+async fn fetch_block_channel_events<Node>(
     node: &Node,
     block_id: HeaderId,
     transactions: &[SignedOps<Unverified, StandardMode>],
     channel_id: ChannelId,
-) -> Result<DepositEvents, Error>
+) -> Result<ChannelBlockEvents, Error>
 where
     Node: adapter::Node + Sync,
 {
-    adapter::fetch_block_deposit_events(node, block_id, transactions, channel_id)
+    adapter::fetch_block_channel_events(node, block_id, transactions, channel_id)
         .await
         .map_err(|err| {
             Error::Network(format!(
@@ -822,16 +856,20 @@ where
 {
     let mut prepared = Vec::with_capacity(blocks.len());
     for block in blocks {
-        let deposit_events =
-            fetch_block_deposit_events(node, block.header.id, &block.transactions, channel_id)
+        let events =
+            fetch_block_channel_events(node, block.header.id, &block.transactions, channel_id)
                 .await?;
         let observed = block_observed_ops(
             &block.transactions,
             channel_id,
             block.header.slot,
-            &deposit_events,
+            &events.deposits,
         );
-        prepared.push(BackfillBlock { block, observed });
+        prepared.push(BackfillBlock {
+            block,
+            observed,
+            note_set: events.note_set,
+        });
     }
     Ok(prepared)
 }
@@ -862,8 +900,12 @@ fn apply_backfilled_block(
     backfill: BackfillBlock,
     channel_id: ChannelId,
     lib: HeaderId,
-) {
-    let BackfillBlock { block, observed } = backfill;
+) -> Result<(), Error> {
+    let BackfillBlock {
+        block,
+        observed,
+        note_set,
+    } = backfill;
     let block_id = block.header.id;
     let parent_id = block.header.parent_block;
 
@@ -871,7 +913,15 @@ fn apply_backfilled_block(
     let channel_txs = classify_channel_txs(&block.transactions, channel_id);
 
     // Use current state lib to avoid premature finalization
-    state.process_block(block_id, parent_id, lib, our_txs, channel_txs, observed);
+    state.process_block(
+        block_id,
+        parent_id,
+        lib,
+        our_txs,
+        channel_txs,
+        observed,
+        note_set,
+    )
 }
 
 /// Classify a block's channel-touching txs in tx-then-op order: a `publish`

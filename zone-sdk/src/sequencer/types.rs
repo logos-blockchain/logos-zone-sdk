@@ -9,13 +9,15 @@ use lb_core::{
         channel::ChannelState,
         gas::GasCost,
         ledger::verification_mode::StandardMode,
-        notes::{OutputCommitments, ProgramId},
+        note_set::CommitmentMmr,
+        notes::{NoteCommitment, NoteNullifier, OutputCommitments, ProgramId},
         ops::{
             Op, OpProof,
             channel::{
                 ChannelId, MsgId, config::ChannelConfigOp, deposit::Metadata,
                 inscribe::Inscription, withdraw::ChannelWithdrawOp,
             },
+            proof_program_step::ProgramNoteOpening,
         },
         programs::ProgramVerificationKey,
         traits::Hashable as _,
@@ -23,7 +25,9 @@ use lb_core::{
     },
     proofs::channel_multi_sig_proof::IndexedSignature,
 };
+use lb_groth16::{Fr, serde::serde_fr};
 use lb_key_management_system_service::keys::{Ed25519Key, UnverifiedEd25519PublicKey, ZkPublicKey};
+use lb_mmr::MerklePath;
 
 use super::tx_builder::sign_prepared;
 use crate::InscriptionSteps;
@@ -65,6 +69,11 @@ pub struct SequencerCheckpoint {
     /// Funding record of each pending tx this sequencer submitted.
     #[serde(default)]
     pub funding: Vec<PendingFunding>,
+    /// The finalized program note set. `None` in checkpoints written before
+    /// the set was tracked: the set is then rebuilt from the finalized
+    /// history on restore.
+    #[serde(default)]
+    pub program_notes: Option<ProgramNotesCheckpoint>,
 }
 
 /// How a pending tx was funded: when, and with which channel ops, so a stale
@@ -370,6 +379,11 @@ pub enum Error {
     /// The step proofs do not fit the steps of the inscription.
     #[error("step proofs rejected: {0}")]
     InvalidStepProofs(String),
+    /// A block's update of the channel's note set could not be applied, so
+    /// the tracked set would no longer match the ledger's. The block is not
+    /// recorded.
+    #[error("channel note set: {0}")]
+    NoteSet(String),
     /// The program key is not a valid Groth16 verification key; the ledger
     /// would reject the registration. Not recoverable by retrying.
     #[error("program key rejected: {0}")]
@@ -637,40 +651,38 @@ pub enum ObservedOp {
     ProgramRegister(ProgramRegisterInfo),
 }
 
-// TODO(private-utxo): successor is the program note, a note of the channel
-// held by the program with its opening (value, nonce, staking key, data) and
-// public nullifier, which the sequencer tracks and keeps past immutability.
-/// A note owned by the channel, as reconstructed from block data.
-///
-/// Every note carries its exact `value`, owning `pk`, and creation `slot`.
-/// Tracking each note individually — rather than as an aggregate group — is
-/// what lets a withdrawal client apply a per-note dust policy (by value and
-/// age) under a permissionless deposit stream.
-#[cfg(any())]
+/// A program note of the channel, with what a program step needs to spend
+/// it: its opening and its path in the channel's commitment MMR, current at
+/// the view's root.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ChannelNote {
-    pub note_id: NoteId,
-    /// The note's value.
-    pub value: Value,
-    /// The key holding the note's `PoS` participation power.
-    pub pk: ZkPublicKey,
-    /// The block slot the note was created in — its age reference. A note's age
-    /// at any tip is that tip's slot minus this. Chain-anchored, so it is
-    /// deterministic and survives sequencer restarts.
-    pub slot: Slot,
+pub struct ProgramNote {
+    pub commitment: NoteCommitment,
+    /// The program holding the note.
+    #[serde(with = "serde_fr")]
+    pub program: ProgramId,
+    pub opening: ProgramNoteOpening,
+    /// Public: every program note hangs off the key of the secret `0`.
+    pub nullifier: NoteNullifier,
+    pub path: MerklePath,
 }
 
-/// The channel's note set as tracked from block data.
-///
-/// `finalized` holds notes created below LIB and unspent at the tracked tip
-/// — immune to reorgs. `unfinalized` holds notes created above LIB on the
-/// tracked branch; they can disappear on a branch change (their ids are
-/// branch-stable, so a re-included op recreates the same ids).
-#[cfg(any())]
-#[derive(Debug, Clone, Default)]
-pub struct ChannelWalletView {
-    pub finalized: Vec<ChannelNote>,
-    pub unfinalized: Vec<ChannelNote>,
+/// The channel's program notes at a tip: what a new program step may
+/// consume. `finalized` holds the notes also in the finalized set, immune to
+/// reorgs; `unfinalized` the ones created above LIB on the tip's branch. The
+/// paths are against `root`, the channel's commitment MMR root at the tip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgramNotesView {
+    pub root: Fr,
+    pub finalized: Vec<ProgramNote>,
+    pub unfinalized: Vec<ProgramNote>,
+}
+
+/// The finalized program note set, as a checkpoint carries it: the channel's
+/// commitment MMR at LIB and the program notes with their paths at that root.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ProgramNotesCheckpoint {
+    pub commitments: CommitmentMmr,
+    pub notes: Vec<ProgramNote>,
 }
 
 /// A tx enqueued for posting and surfaced as a publish return value or in

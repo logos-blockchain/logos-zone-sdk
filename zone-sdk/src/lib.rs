@@ -111,7 +111,11 @@ pub mod node_types {
         mantle::{
             SignedOps, TxHash, Value,
             channel::ChannelState,
-            notes::{InputNullifiers, OutputCommitments, ProgramId, derive_program_output_nonce},
+            note_set::CommitmentMmr,
+            notes::{
+                InputNullifiers, NoteCommitment, NoteNullifier, OutputCommitments, ProgramId,
+                derive_program_output_nonce,
+            },
             ops::{
                 OpId, ProgramNoteOpening,
                 channel::{
@@ -129,6 +133,7 @@ pub mod node_types {
         mantle::LimitsResponseBody,
         wallet::fund::{WalletFundRequestBody, WalletFundResponseBody},
     };
+    pub use lb_mmr::MerklePath;
 }
 
 use std::sync::Arc;

@@ -18,7 +18,9 @@ use lb_core::{
 use lb_key_management_system_service::keys::Ed25519Signature;
 
 use super::{
-    types::{Error, PreparedChannelConfig, ProgramRegisterInfo, SequencerCheckpoint},
+    types::{
+        Error, PreparedChannelConfig, ProgramNotesView, ProgramRegisterInfo, SequencerCheckpoint,
+    },
     zone_sequencer::ZoneSequencer,
 };
 use crate::{adapter, sequencer::zone_sequencer::PublishReceipt};
@@ -260,5 +262,13 @@ where
     ) -> Result<PublishReceipt, Error> {
         self.sequencer
             .do_submit_channel_config(prepared, signatures)
+    }
+
+    /// The channel's program notes a new step may consume at the current
+    /// tip, with their paths against the view's root. Async counterpart:
+    /// [`super::SequencerClient::program_notes`].
+    #[must_use]
+    pub fn program_notes(&self) -> ProgramNotesView {
+        self.sequencer.program_notes()
     }
 }

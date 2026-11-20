@@ -5072,6 +5072,7 @@ dependencies = [
  "logos-blockchain-http-api-common",
  "logos-blockchain-key-management-system-service",
  "logos-blockchain-log-targets",
+ "logos-blockchain-mmr",
  "logos-blockchain-time",
  "reqwest 0.12.28",
  "rpds",
