@@ -21,8 +21,8 @@ use lb_groth16::{
 };
 use lb_http_api_common::bodies::{
     channel::{
-        ChannelDepositRequestBody, ChannelDepositResponseBody, ChannelStepRequestBody,
-        ChannelWithdrawRequestBody, ProgramDepositBody,
+        ChannelDepositRequestBody, ChannelStepRequestBody, ChannelWithdrawRequestBody,
+        ProgramDepositBody,
     },
     wallet::import::WalletImportNoteRequestBody,
 };
@@ -103,7 +103,7 @@ pub async fn deposit_into_channel(
     let holder = holder_key(world, wallet_name)?;
     let node = holder_node(world, wallet_name)?;
     let channel_id = world.zone.sequencer_channel_id(sequencer_alias)?;
-    let body = ChannelDepositRequestBody {
+    let body = || ChannelDepositRequestBody {
         tip: None,
         channel_id,
         amount,
@@ -113,15 +113,17 @@ pub async fn deposit_into_channel(
         funding_public_keys: vec![holder],
         max_tx_fee: GasCost::new(u64::MAX),
     };
-    let url = node
-        .base_url()
-        .join("channel/deposit")
-        .map_err(|error| StepError::LogicalError {
-            message: format!("Bad node url: {error}"),
-        })?;
     let client = CommonHttpClient::new(None);
-    let response: ChannelDepositResponseBody =
-        retry_until_spendable("channel deposit", || client.post(url.clone(), &body)).await?;
+    // The node signs the deposit and hands it back; the holder submits it.
+    let response = retry_until_spendable("channel deposit", || {
+        client.prepare_channel_deposit(node.base_url().clone(), body())
+    })
+    .await?;
+    node.submit_transaction(&response.transaction)
+        .await
+        .map_err(|error| StepError::LogicalError {
+            message: format!("Submitting the channel deposit failed: {error}"),
+        })?;
     ensure_zone_transactions_included(&node, &[response.hash], Duration::from_mins(3))
         .await
         .map_err(|error| zone_step_error(step, &error))?;
