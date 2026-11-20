@@ -1,0 +1,22 @@
+[package]
+categories  = { workspace = true }
+description = "Zone SDK backend (adapter::Node) that talks to blockchain_module through logos-blockchain-client instead of HTTP"
+edition     = { workspace = true }
+keywords    = { workspace = true }
+license     = { workspace = true }
+name        = "logos-blockchain-zone-sdk-module-backend"
+publish     = false
+readme      = "README.md"
+repository  = { workspace = true }
+version     = { workspace = true }
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait             = { workspace = true }
+futures                 = { workspace = true }
+lb-zone-sdk             = { workspace = true }
+logos-blockchain-client = { workspace = true }
+tokio                   = { features = ["sync"], workspace = true }
+tracing                 = { workspace = true }
