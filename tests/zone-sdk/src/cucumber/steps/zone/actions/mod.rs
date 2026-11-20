@@ -124,7 +124,9 @@ pub(super) use cluster::{
     register_zone_sequencers_with_shared_key, start_nodes_with_zone_resources,
 };
 pub(super) use program::{
-    publish_program_step, register_zone_program, wait_for_tracked_program_notes,
+    ProgramBlockContent, deposit_into_channel, pay_into_program, publish_program_block,
+    register_zone_program, wait_for_tracked_program_notes, wait_for_wallet_note,
+    withdraw_channel_note,
 };
 pub(super) use publishing::{
     initialize_zone_indexer, publish_zone_messages, publish_zone_messages_concurrently,

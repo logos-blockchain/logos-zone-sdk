@@ -74,6 +74,13 @@ fn apply_zone_timing_defaults(world: &mut ZoneWorld, step: &str) -> StepResult {
         step,
         "eras.0.cryptarchia.slot_activation_coeff.denominator",
         "2",
+    )?;
+    // Short enough for a scenario to see a channel withdrawal released.
+    set_deployment_config_override(
+        &mut world.node,
+        step,
+        "eras.0.cryptarchia.channel_withdraw_delay",
+        "30",
     )
 }
 

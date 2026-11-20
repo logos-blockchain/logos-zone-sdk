@@ -5,8 +5,15 @@ use std::{
 
 use lb_core::{
     mantle::{
+        Note,
         notes::NoteCommitment,
-        ops::channel::{ChannelId, MsgId, inscribe::Inscription},
+        ops::{
+            StepProof,
+            channel::{
+                ChannelId, MsgId,
+                inscribe::{Inscription, Step},
+            },
+        },
     },
     proofs::channel_multi_sig_proof::IndexedSignatures,
 };
@@ -101,6 +108,10 @@ pub struct ZoneState {
     programs: HashMap<String, ZoneProgram>,
     /// The notes the program step of a published zone block created.
     program_outputs: HashMap<String, Vec<NoteCommitment>>,
+    /// Channel notes a holder knows the opening of: deposits and payouts.
+    channel_notes: HashMap<String, Note>,
+    /// Steps a holder's node built and proved, for a zone block to carry.
+    holder_steps: HashMap<String, (Step, StepProof)>,
     sequencer_startups: HashMap<String, ZoneSequencerStartup>,
     sorted_total_payloads: Option<usize>,
     sorted_expected_by_sequencer: Option<HashMap<String, Vec<Inscription>>>,
@@ -379,6 +390,32 @@ impl ZoneState {
             .map(Vec::as_slice)
             .ok_or(StepError::LogicalError {
                 message: format!("Zone block '{block_alias}' published no program step"),
+            })
+    }
+
+    pub fn remember_channel_note(&mut self, alias: String, note: Note) {
+        self.channel_notes.insert(alias, note);
+    }
+
+    pub fn channel_note(&self, alias: &str) -> Result<Note, StepError> {
+        self.channel_notes
+            .get(alias)
+            .copied()
+            .ok_or(StepError::LogicalError {
+                message: format!("Channel note '{alias}' not found"),
+            })
+    }
+
+    pub fn remember_holder_step(&mut self, alias: String, step: Step, proof: StepProof) {
+        self.holder_steps.insert(alias, (step, proof));
+    }
+
+    pub fn holder_step(&self, alias: &str) -> Result<(Step, StepProof), StepError> {
+        self.holder_steps
+            .get(alias)
+            .cloned()
+            .ok_or(StepError::LogicalError {
+                message: format!("Holder step '{alias}' not found"),
             })
     }
 
@@ -683,6 +720,8 @@ impl ZoneState {
         self.prepared_configs.clear();
         self.programs.clear();
         self.program_outputs.clear();
+        self.channel_notes.clear();
+        self.holder_steps.clear();
         self.prepared_config_signatures.clear();
         self.expected_custom_payloads.clear();
         self.view_violations.clear();

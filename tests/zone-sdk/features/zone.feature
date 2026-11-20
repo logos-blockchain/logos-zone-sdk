@@ -720,7 +720,7 @@ Feature: Zone SDK
     Then the channel view contract holds for all zone sequencers
 
   @zone_ci
-  Scenario: Sequencer builds and proves program steps on the notes it tracks
+  Scenario: A holder's deposit moves through the program and back to the holder
     Given the genesis block has the following wallet resources:
       | account_index | token_count | token_amount |
       | 1             | 3           | 100000       |
@@ -739,12 +739,18 @@ Feature: Zone SDK
     When sequencer "SEQ_A" registers zone program "PROGRAM_1"
     Then zone transaction "PROGRAM_1" is included in 120 seconds
     And sequencer "SEQ_A" observes program registration "PROGRAM_1" in 120 seconds
-    When sequencer "SEQ_A" publishes zone block "BLOCK_1" with a step of program "PROGRAM_1" creating a note
+    When wallet "WALLET_1A" deposits 1000 LGO into the channel of sequencer "SEQ_A" as "DEPOSIT"
+    Then zone transaction "DEPOSIT" is included in 120 seconds
+    When wallet "WALLET_1A" pays 600 LGO of its channel notes to program "PROGRAM_1" of sequencer "SEQ_A" as step "PAY_IN"
+    And sequencer "SEQ_A" publishes zone block "BLOCK_1" with step "PAY_IN" and a step of program "PROGRAM_1" collecting it
     Then zone transaction "BLOCK_1" is included in 120 seconds
     And sequencer "SEQ_A" tracks the program notes zone block "BLOCK_1" created in 120 seconds
-    When sequencer "SEQ_A" publishes zone block "BLOCK_2" with a step of program "PROGRAM_1" consuming its notes
+    When sequencer "SEQ_A" publishes zone block "BLOCK_2" with a step of program "PROGRAM_1" paying its notes to wallet "WALLET_1A" as "PAYOUT"
     Then zone transaction "BLOCK_2" is included in 120 seconds
     And sequencer "SEQ_A" tracks the program notes zone block "BLOCK_2" created in 120 seconds
+    When wallet "WALLET_1A" withdraws channel note "PAYOUT" from the channel of sequencer "SEQ_A" as "WITHDRAW"
+    Then zone transaction "WITHDRAW" is included in 120 seconds
+    And wallet "WALLET_1A" holds a ledger note of 600 LGO in 180 seconds
     And the zone indexer returns messages in this order:
       | alias   |
       | MSG_1   |
