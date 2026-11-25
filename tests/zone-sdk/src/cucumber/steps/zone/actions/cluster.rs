@@ -4,7 +4,7 @@ use super::{
     start_node, start_nodes_order_respecting_dependencies, warn,
 };
 
-pub(in super::super) fn register_zone_sequencers_with_shared_key(
+pub fn register_zone_sequencers_with_shared_key(
     world: &mut ZoneWorld,
     source_alias: &str,
     aliases: Vec<String>,
@@ -18,7 +18,7 @@ pub(in super::super) fn register_zone_sequencers_with_shared_key(
     Ok(())
 }
 
-pub(in super::super) async fn start_nodes_with_zone_resources(
+pub async fn start_nodes_with_zone_resources(
     world: &mut ZoneWorld,
     step: &Step,
     rows: Vec<ZoneNodeResourcesRow>,
@@ -74,6 +74,13 @@ fn apply_zone_timing_defaults(world: &mut ZoneWorld, step: &str) -> StepResult {
         step,
         "eras.0.cryptarchia.slot_activation_coeff.denominator",
         "2",
+    )?;
+    // Short enough for a scenario to see a channel withdrawal released.
+    set_deployment_config_override(
+        &mut world.node,
+        step,
+        "eras.0.cryptarchia.channel_withdraw_delay",
+        "30",
     )
 }
 

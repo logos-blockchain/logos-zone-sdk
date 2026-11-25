@@ -16,20 +16,22 @@ use lb_common_http_client::{
     ProcessedBlockEvent, Slot, State, TimeInfo,
 };
 use lb_core::{
+    crypto::Hash,
     era::ForkDigest,
-    events::{DepositNote, Event as ChainEvent, TxEvent, TxEventPayload},
+    events::{BlockEvent, Event as ChainEvent, TxEvent, TxEventPayload},
     header::{ContentId, HeaderId},
     mantle::{
-        Op, SignedOps, Value,
+        Op, SignedOps,
         channel::ChannelState,
         gas::GasCost,
         ledger::verification_mode::StandardMode,
+        note_set::{NoteSetIndex, NoteSetUpdate},
         ops::{
             OpId as _,
             channel::{
                 ChannelId, MsgId, UnverifiedChannelKeys,
                 deposit::DepositOp,
-                inscribe::{Inscription, InscriptionOp},
+                inscribe::{Inscription, InscriptionOp, MiniBlocks},
             },
         },
         traits::Hashable as _,
@@ -48,7 +50,7 @@ use tokio::sync::{mpsc, watch};
 use crate::{
     ZoneMessage,
     adapter::{self, BoxStream},
-    sequencer::FundingConfig,
+    sequencer::{FundingConfig, ObservedOp},
 };
 
 /// The fork digest the transactions of the tests carry.
@@ -384,7 +386,6 @@ impl adapter::Node for MockNode {
 pub fn funding_config() -> FundingConfig {
     FundingConfig {
         funding_pk: Fr::from(1u64).into(),
-        change_pk: None,
         max_tx_fee: GasCost::new(u64::MAX),
         priority_fee_percent: FundingConfig::DEFAULT_PRIORITY_FEE_PERCENT,
     }
@@ -408,7 +409,6 @@ pub fn single_key_channel_state() -> ChannelState {
         tip_sequencer_starting_slot: Slot::default(),
         posting_timeframe: 0u32.into(),
         posting_timeout: 0u32.into(),
-        transfer_threshold: 1,
     }
 }
 
@@ -467,24 +467,42 @@ pub fn inscribe_op(channel_id: ChannelId, parent: MsgId, payload: &[u8]) -> Insc
         signer: Ed25519Key::from_bytes(&[0u8; 32])
             .public_key()
             .into_unverified(),
+        mini_blocks: MiniBlocks::default(),
     }
 }
 
-/// A `Deposit` block event matching `op` inside `tx`, recreating `notes`.
-pub fn deposit_event(
-    tx: &SignedOps<Unverified, StandardMode>,
-    op: &DepositOp,
-    amount: Value,
-    notes: Vec<DepositNote>,
-) -> Events {
-    Events::from(ChainEvent::Tx(TxEvent::new(
-        tx.hash(),
-        op.op_id(),
-        TxEventPayload::Deposit {
-            channel_id: op.channel_id,
-            amount,
-            metadata: op.metadata.clone(),
-            notes: notes.try_into().expect("bounded note count"),
-        },
-    )))
+/// A `Deposit` block event matching `op` inside `tx`, with its outputs.
+/// The events a node emits for a deposit: the deposit event of its op and
+/// the update of the channel's note set it appends to.
+pub fn deposit_event(tx: &SignedOps<Unverified, StandardMode>, op: &DepositOp) -> Events {
+    [
+        ChainEvent::Tx(TxEvent::new(
+            tx.hash(),
+            op.op_id(),
+            TxEventPayload::Deposit {
+                channel_id: op.channel_id,
+                metadata: op.metadata.clone(),
+                outputs: op.outputs.clone(),
+            },
+        )),
+        ChainEvent::Block(BlockEvent::NoteSetUpdated(NoteSetUpdate {
+            note_set: NoteSetIndex::Channel(op.channel_id),
+            nullifiers: op.inputs.iter().copied().collect(),
+            commitments: op.outputs.iter().copied().collect(),
+        })),
+    ]
+    .into_iter()
+    .collect()
+}
+
+/// The deposit op ids among `observed`, in order.
+#[must_use]
+pub fn observed_deposit_ids(observed: &[ObservedOp]) -> Vec<Hash> {
+    observed
+        .iter()
+        .filter_map(|op| match op {
+            ObservedOp::Deposit(deposit) => Some(deposit.op_id),
+            ObservedOp::ProgramRegister(_) => None,
+        })
+        .collect()
 }

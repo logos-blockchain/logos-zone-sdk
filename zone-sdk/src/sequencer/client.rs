@@ -2,8 +2,15 @@ use lb_core::{
     mantle::{
         SignedOps,
         channel::{SlotTimeframe, SlotTimeout},
-        ledger::{NoteId, verification_mode::StandardMode},
-        ops::channel::{MsgId, VerifiedChannelKeys, inscribe::Inscription},
+        ledger::verification_mode::StandardMode,
+        ops::{
+            StepProof,
+            channel::{
+                MsgId, VerifiedChannelKeys,
+                inscribe::{Inscription, InscriptionOp, MiniBlocks},
+            },
+        },
+        programs::ProgramVerificationKey,
         transactions::{Ops, states::Unverified},
     },
     proofs::channel_multi_sig_proof::IndexedSignatures,
@@ -12,9 +19,10 @@ use lb_key_management_system_service::keys::Ed25519Signature;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use super::{
+    program_steps::{MiniBlockRequest, PreparedProgramInscription},
     types::{
-        ChannelWalletView, Error, Event, PreparedAtomicBundle, PreparedChannelConfig,
-        SequencerChannelView, SequencerCheckpoint, TurnNotification, WithdrawArg, WithdrawInputs,
+        Error, Event, PreparedChannelConfig, ProgramNotesView, ProgramRegisterInfo,
+        SequencerChannelView, SequencerCheckpoint, TurnNotification,
     },
     zone_sequencer::ActorRequest,
 };
@@ -72,40 +80,48 @@ impl SequencerClient {
         Self::recv(response_rx).await?
     }
 
-    /// Publish an atomic inscription+withdraw bundle.
-    ///
-    /// Async counterpart of
-    /// [`super::SequencerHandle::publish_atomic_withdraw`].
-    pub async fn publish_atomic_withdraw(
+    /// Async counterpart of [`super::SequencerHandle::prepare_inscription`].
+    pub async fn prepare_inscription(
         &self,
-        inscribe: Inscription,
-        withdraws: Vec<WithdrawArg>,
-        inputs: WithdrawInputs,
-    ) -> Result<PublishReceipt, Error> {
+        data: Inscription,
+        mini_blocks: MiniBlocks,
+    ) -> Result<InscriptionOp, Error> {
         let (response_tx, response_rx) = oneshot::channel();
-        self.send(ActorRequest::PublishAtomicWithdraw {
-            inscribe,
-            withdraws,
-            inputs,
+        self.send(ActorRequest::PrepareInscription {
+            data,
+            mini_blocks,
             response_tx,
         })?;
         Self::recv(response_rx).await?
     }
 
-    /// Publish an atomic inscription+transfer bundle pinning an observed
-    /// deposit.
-    ///
     /// Async counterpart of
-    /// [`super::SequencerHandle::publish_pin_deposit`].
-    pub async fn publish_pin_deposit(
+    /// [`super::SequencerHandle::prepare_program_inscription`].
+    pub async fn prepare_program_inscription(
         &self,
-        inscribe: Inscription,
-        consumed_notes: Vec<NoteId>,
+        data: Inscription,
+        mini_blocks: Vec<MiniBlockRequest>,
+    ) -> Result<PreparedProgramInscription, Error> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.send(ActorRequest::PrepareProgramInscription {
+            data,
+            mini_blocks,
+            response_tx,
+        })?;
+        Self::recv(response_rx).await?
+    }
+
+    /// Async counterpart of
+    /// [`super::SequencerHandle::submit_prepared_inscription`].
+    pub async fn submit_prepared_inscription(
+        &self,
+        op: InscriptionOp,
+        step_proofs: Vec<StepProof>,
     ) -> Result<PublishReceipt, Error> {
         let (response_tx, response_rx) = oneshot::channel();
-        self.send(ActorRequest::PublishPinDeposit {
-            inscribe,
-            consumed_notes,
+        self.send(ActorRequest::SubmitPreparedInscription {
+            op: Box::new(op),
+            step_proofs,
             response_tx,
         })?;
         Self::recv(response_rx).await?
@@ -120,7 +136,6 @@ impl SequencerClient {
         posting_timeframe: SlotTimeframe,
         posting_timeout: SlotTimeout,
         configuration_threshold: u16,
-        transfer_threshold: u16,
     ) -> Result<(PublishReceipt, SignedOps<Unverified, StandardMode>), Error> {
         let (response_tx, response_rx) = oneshot::channel();
         self.send(ActorRequest::ChannelConfig {
@@ -128,7 +143,19 @@ impl SequencerClient {
             posting_timeframe,
             posting_timeout,
             configuration_threshold,
-            transfer_threshold,
+            response_tx,
+        })?;
+        Self::recv(response_rx).await?
+    }
+
+    /// Async counterpart of [`super::SequencerHandle::register_program`].
+    pub async fn register_program(
+        &self,
+        verification_key: ProgramVerificationKey,
+    ) -> Result<(ProgramRegisterInfo, SequencerCheckpoint), Error> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.send(ActorRequest::RegisterProgram {
+            verification_key: Box::new(verification_key),
             response_tx,
         })?;
         Self::recv(response_rx).await?
@@ -144,7 +171,6 @@ impl SequencerClient {
         posting_timeframe: SlotTimeframe,
         posting_timeout: SlotTimeout,
         configuration_threshold: u16,
-        transfer_threshold: u16,
     ) -> Result<PreparedChannelConfig, Error> {
         let (response_tx, response_rx) = oneshot::channel();
         self.send(ActorRequest::PrepareChannelConfig {
@@ -152,7 +178,6 @@ impl SequencerClient {
             posting_timeframe,
             posting_timeout,
             configuration_threshold,
-            transfer_threshold,
             response_tx,
         })?;
         Self::recv(response_rx).await?
@@ -170,54 +195,6 @@ impl SequencerClient {
     ) -> Result<PublishReceipt, Error> {
         let (response_tx, response_rx) = oneshot::channel();
         self.send(ActorRequest::SubmitChannelConfig {
-            prepared: Box::new(prepared),
-            signatures,
-            response_tx,
-        })?;
-        Self::recv(response_rx).await?
-    }
-
-    /// Build and fund an atomic withdraw bundle for external multi-sig signing.
-    pub async fn prepare_atomic_withdraw(
-        &self,
-        inscribe: Inscription,
-        withdraws: Vec<WithdrawArg>,
-        inputs: WithdrawInputs,
-    ) -> Result<PreparedAtomicBundle, Error> {
-        let (response_tx, response_rx) = oneshot::channel();
-        self.send(ActorRequest::PrepareAtomicWithdraw {
-            inscribe,
-            withdraws,
-            inputs,
-            response_tx,
-        })?;
-        Self::recv(response_rx).await?
-    }
-
-    /// Build and fund a pin-deposit bundle for external multi-sig signing.
-    pub async fn prepare_pin_deposit(
-        &self,
-        inscribe: Inscription,
-        consumed_notes: Vec<NoteId>,
-    ) -> Result<PreparedAtomicBundle, Error> {
-        let (response_tx, response_rx) = oneshot::channel();
-        self.send(ActorRequest::PreparePinDeposit {
-            inscribe,
-            consumed_notes,
-            response_tx,
-        })?;
-        Self::recv(response_rx).await?
-    }
-
-    /// Submit a [`PreparedAtomicBundle`] with its externally-collected
-    /// signatures.
-    pub async fn submit_atomic_bundle(
-        &self,
-        prepared: PreparedAtomicBundle,
-        signatures: IndexedSignatures,
-    ) -> Result<PublishReceipt, Error> {
-        let (response_tx, response_rx) = oneshot::channel();
-        self.send(ActorRequest::SubmitAtomicBundle {
             prepared: Box::new(prepared),
             signatures,
             response_tx,
@@ -272,11 +249,11 @@ impl SequencerClient {
         Self::recv(response_rx).await?
     }
 
-    /// The channel's tracked note set, served by the drive task — see
-    /// [`super::ZoneSequencer::channel_wallet`].
-    pub async fn channel_wallet(&self) -> Result<ChannelWalletView, Error> {
+    /// The channel's program notes a new step may consume, served by the
+    /// drive task — see [`super::ZoneSequencer::program_notes`].
+    pub async fn program_notes(&self) -> Result<ProgramNotesView, Error> {
         let (response_tx, response_rx) = oneshot::channel();
-        self.send(ActorRequest::ChannelWallet { response_tx })?;
+        self.send(ActorRequest::ProgramNotes { response_tx })?;
         Self::recv(response_rx).await
     }
 

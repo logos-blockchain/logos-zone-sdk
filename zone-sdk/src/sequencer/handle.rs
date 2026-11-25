@@ -2,8 +2,15 @@ use lb_core::{
     mantle::{
         SignedOps,
         channel::{SlotTimeframe, SlotTimeout},
-        ledger::{NoteId, verification_mode::StandardMode},
-        ops::channel::{MsgId, VerifiedChannelKeys, inscribe::Inscription},
+        ledger::verification_mode::StandardMode,
+        ops::{
+            StepProof,
+            channel::{
+                MsgId, VerifiedChannelKeys,
+                inscribe::{Inscription, InscriptionOp, MiniBlocks},
+            },
+        },
+        programs::ProgramVerificationKey,
         transactions::{Ops, states::Unverified},
     },
     proofs::channel_multi_sig_proof::IndexedSignatures,
@@ -11,9 +18,9 @@ use lb_core::{
 use lb_key_management_system_service::keys::Ed25519Signature;
 
 use super::{
+    program_steps::{MiniBlockRequest, PreparedProgramInscription},
     types::{
-        ChannelWalletView, Error, PreparedAtomicBundle, PreparedChannelConfig, WithdrawArg,
-        WithdrawInputs,
+        Error, PreparedChannelConfig, ProgramNotesView, ProgramRegisterInfo, SequencerCheckpoint,
     },
     zone_sequencer::ZoneSequencer,
 };
@@ -84,6 +91,56 @@ where
         self.sequencer.do_publish(data).await
     }
 
+    /// Build the inscription of `data` applying `mini_blocks` on the current
+    /// publish tip, without publishing it.
+    ///
+    /// The returned op fixes the `op_id` the program step proofs bind. A
+    /// user step or program deposit binds its own id, not the `op_id`.
+    pub fn prepare_inscription(
+        &mut self,
+        data: Inscription,
+        mini_blocks: MiniBlocks,
+    ) -> Result<InscriptionOp, Error> {
+        self.sequencer.do_prepare_inscription(data, mini_blocks)
+    }
+
+    /// Build the inscription of `data` with `mini_blocks` on the current
+    /// publish tip, its program steps spending the channel's program notes
+    /// and carrying the witness of their spend, without publishing it. The
+    /// spends are proven with [`super::prove_program_step`], off the drive
+    /// loop, and the inscription is published with
+    /// [`Self::submit_prepared_inscription`] and
+    /// [`PreparedProgramInscription::step_proofs`]. Async counterpart:
+    /// [`super::SequencerClient::prepare_program_inscription`].
+    pub fn prepare_program_inscription(
+        &mut self,
+        data: Inscription,
+        mini_blocks: Vec<MiniBlockRequest>,
+    ) -> Result<PreparedProgramInscription, Error> {
+        self.sequencer
+            .do_prepare_program_inscription(data, mini_blocks)
+    }
+
+    /// Enqueue a prepared inscription with one proof per step.
+    ///
+    /// The op is published as prepared: a stale re-fund replaces only the
+    /// fee inputs, so the `op_id` and every proof stay valid. The op is never
+    /// rebuilt silently. A publish tip that moved since
+    /// [`Self::prepare_inscription`] fails with [`Error::ChannelStateChanged`],
+    /// and an inscription that lands then drops off the canonical branch
+    /// comes back orphaned in a [`super::ChannelUpdate`] with its steps. Both
+    /// mean: prepare again, re-prove the program steps against the new
+    /// `op_id`, keep the users' proofs, submit again.
+    pub async fn submit_prepared_inscription(
+        &mut self,
+        op: InscriptionOp,
+        step_proofs: Vec<StepProof>,
+    ) -> Result<PublishReceipt, Error> {
+        self.sequencer
+            .do_submit_prepared_inscription(op, step_proofs)
+            .await
+    }
+
     /// Build an [`Ops`] for the given ops and an inscription message,
     /// without submitting it.
     ///
@@ -150,7 +207,6 @@ where
         posting_timeframe: SlotTimeframe,
         posting_timeout: SlotTimeout,
         configuration_threshold: u16,
-        transfer_threshold: u16,
     ) -> Result<(PublishReceipt, SignedOps<Unverified, StandardMode>), Error> {
         self.sequencer
             .do_channel_config(
@@ -158,9 +214,22 @@ where
                 posting_timeframe,
                 posting_timeout,
                 configuration_threshold,
-                transfer_threshold,
             )
             .await
+    }
+
+    /// Register a program by its verification key: one funded
+    /// `ProgramRegister` op, no signature. Registering a key already
+    /// registered has no effect, so repeating the call is safe. The
+    /// sequencer re-posts and re-funds the tx until it finalizes; the
+    /// registration is reported as `ObservedOp::ProgramRegister` when its
+    /// block joins the canonical chain and as `FinalizedOp::ProgramRegister`
+    /// once final.
+    pub async fn register_program(
+        &mut self,
+        verification_key: ProgramVerificationKey,
+    ) -> Result<(ProgramRegisterInfo, SequencerCheckpoint), Error> {
+        self.sequencer.do_register_program(verification_key).await
     }
 
     /// Build and fund a channel-config tx for external multi-sig signing.
@@ -184,7 +253,6 @@ where
         posting_timeframe: SlotTimeframe,
         posting_timeout: SlotTimeout,
         configuration_threshold: u16,
-        transfer_threshold: u16,
     ) -> Result<PreparedChannelConfig, Error> {
         self.sequencer
             .do_prepare_channel_config(
@@ -192,7 +260,6 @@ where
                 posting_timeframe,
                 posting_timeout,
                 configuration_threshold,
-                transfer_threshold,
             )
             .await
     }
@@ -215,104 +282,11 @@ where
             .do_submit_channel_config(prepared, signatures)
     }
 
-    /// Publish an atomic inscription+withdraw bundle.
-    ///
-    /// Reads this sequencer's
-    /// accredited-key index from cached channel state (kept fresh by the
-    /// drive loop). Selects the inscription's `parent_msg` from the current
-    /// canonical tip, builds the bundled `MantleTx` (funding it from the
-    /// node's wallet, see
-    /// [`SequencerConfig::funding`](super::SequencerConfig::funding)), signs
-    /// the funded hash locally with the sequencer's key, and submits. Scoped to
-    /// single-sequencer (centralized) channels — only the sequencer's own
-    /// signature is used.
-    ///
-    /// Returns [`Error::Unavailable`] while cold-start backfill is still in
-    /// progress or the node is disconnected, as [`Self::publish`] does.
-    /// Returns [`Error::Network`] if the channel's `transfer_threshold > 1`
-    /// (which would require multi-sig orchestration this API doesn't
-    /// support).
-    ///
-    /// `inputs` chooses which tracked channel notes fund the transfer —
-    /// [`WithdrawInputs::Auto`] lets the SDK pick covering notes (newest
-    /// first, own-key notes ahead of the rest, then sweeping dust into the
-    /// spare input slots), or [`WithdrawInputs::Explicit`] pins an exact input
-    /// set.
-    pub async fn publish_atomic_withdraw(
-        &mut self,
-        inscribe: Inscription,
-        withdraws: Vec<WithdrawArg>,
-        inputs: WithdrawInputs,
-    ) -> Result<PublishReceipt, Error> {
-        self.sequencer
-            .do_publish_atomic_withdraw(inscribe, withdraws, inputs)
-            .await
-    }
-
-    /// Pin an observed deposit without waiting for finalization: publish
-    /// `[CHANNEL_INSCRIBE, CHANNEL_TRANSFER]`, the transfer consuming
-    /// `consumed_notes` (the deposit's channel `NoteId`s from `DepositInfo`) so
-    /// the tx lands only if the deposit is on chain. Same contract as
-    /// [`Self::publish_atomic_withdraw`]; [`Error::Network`] if a note is not
-    /// in the tracked set (deposit not on this branch, or already
-    /// consumed).
-    pub async fn publish_pin_deposit(
-        &mut self,
-        inscribe: Inscription,
-        consumed_notes: Vec<NoteId>,
-    ) -> Result<PublishReceipt, Error> {
-        self.sequencer
-            .do_publish_pin_deposit(inscribe, consumed_notes)
-            .await
-    }
-
-    /// Build and fund an atomic withdraw bundle for external multi-sig signing
-    /// — the multi-sig counterpart of [`Self::publish_atomic_withdraw`].
-    /// Collect signatures over `sign_payload` and submit via
-    /// [`Self::submit_atomic_bundle`]; the bundled inscription is turn-gated,
-    /// so prepare and submit from the current-turn sequencer.
-    pub async fn prepare_atomic_withdraw(
-        &mut self,
-        inscribe: Inscription,
-        withdraws: Vec<WithdrawArg>,
-        inputs: WithdrawInputs,
-    ) -> Result<PreparedAtomicBundle, Error> {
-        self.sequencer
-            .do_prepare_atomic_withdraw(inscribe, withdraws, inputs)
-            .await
-    }
-
-    /// Build and fund a pin-deposit bundle for external multi-sig signing — the
-    /// multi-sig counterpart of [`Self::publish_pin_deposit`]. See
-    /// [`Self::prepare_atomic_withdraw`] for the signing/submission contract.
-    pub async fn prepare_pin_deposit(
-        &mut self,
-        inscribe: Inscription,
-        consumed_notes: Vec<NoteId>,
-    ) -> Result<PreparedAtomicBundle, Error> {
-        self.sequencer
-            .do_prepare_pin_deposit(inscribe, consumed_notes)
-            .await
-    }
-
-    /// Submit a [`PreparedAtomicBundle`] with its externally-collected
-    /// signatures.
-    ///
-    /// `signatures` must be indexed against
-    /// [`PreparedAtomicBundle::accredited_keys`], with at most one signature
-    /// per index, in any order. Handles both atomic-withdraw and pin-deposit
-    /// bundles.
-    pub fn submit_atomic_bundle(
-        &mut self,
-        prepared: PreparedAtomicBundle,
-        signatures: IndexedSignatures,
-    ) -> Result<PublishReceipt, Error> {
-        self.sequencer.do_submit_atomic_bundle(prepared, signatures)
-    }
-
-    /// The channel's tracked note set — see [`ZoneSequencer::channel_wallet`].
+    /// The channel's program notes a new step may consume at the current
+    /// tip, with their paths against the view's root. Async counterpart:
+    /// [`super::SequencerClient::program_notes`].
     #[must_use]
-    pub fn channel_wallet(&self) -> ChannelWalletView {
-        self.sequencer.channel_wallet()
+    pub fn program_notes(&self) -> ProgramNotesView {
+        self.sequencer.program_notes()
     }
 }

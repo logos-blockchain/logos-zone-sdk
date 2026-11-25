@@ -1,32 +1,36 @@
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
 use lb_common_http_client::Slot;
 use lb_core::{
     crypto::Hash,
-    events::DepositRecreatedNotes,
     header::HeaderId,
     mantle::{
         SignedOps, Value,
         channel::ChannelState,
         gas::GasCost,
-        ledger::{Inputs, NoteId, Outputs, verification_mode::StandardMode},
+        ledger::verification_mode::StandardMode,
+        note_set::CommitmentMmr,
+        notes::{NoteCommitment, NoteNullifier, OutputCommitments, ProgramId},
         ops::{
             Op, OpProof,
             channel::{
-                ChannelId, MsgId, channel_transfer::ChannelTransferOp, config::ChannelConfigOp,
-                deposit::Metadata, inscribe::Inscription, withdraw::ChannelWithdrawOp,
+                ChannelId, MsgId, config::ChannelConfigOp, deposit::Metadata,
+                inscribe::Inscription, withdraw::ChannelWithdrawOp,
             },
+            proof_program_step::ProgramNoteOpening,
         },
+        programs::ProgramVerificationKey,
         traits::Hashable as _,
         transactions::{MantleTxBuilder, Ops, TxHash, states::Unverified},
     },
     proofs::channel_multi_sig_proof::IndexedSignature,
 };
-use lb_key_management_system_service::keys::{
-    Ed25519Key, Ed25519PublicKey, Ed25519Signature, UnverifiedEd25519PublicKey, ZkPublicKey,
-};
+use lb_groth16::{Fr, serde::serde_fr};
+use lb_key_management_system_service::keys::{Ed25519Key, UnverifiedEd25519PublicKey, ZkPublicKey};
+use lb_mmr::MerklePath;
 
 use super::tx_builder::sign_prepared;
+use crate::InscriptionSteps;
 
 const DEFAULT_RESUBMIT_INTERVAL: Duration = Duration::from_secs(30);
 const DEFAULT_RECONNECT_DELAY: Duration = Duration::from_secs(5);
@@ -55,12 +59,6 @@ pub struct SequencerCheckpoint {
     pub lib: HeaderId,
     /// Last known LIB slot (for backfill range queries).
     pub lib_slot: Slot,
-    /// Finalized channel notes as of `lib`. Defaults to empty when restoring
-    /// a checkpoint written before channel-note tracking existed — such
-    /// restores miss notes finalized before the checkpoint; a cold start
-    /// rebuilds the full set.
-    #[serde(default)]
-    pub channel_notes: Vec<ChannelNote>,
     /// The finalized config-lineage tip as of `lib`. Restored so
     /// `config_tip_at` keeps resolving the right config parent after a warm
     /// restart, once the config's block has been pruned below LIB. Defaults
@@ -71,6 +69,11 @@ pub struct SequencerCheckpoint {
     /// Funding record of each pending tx this sequencer submitted.
     #[serde(default)]
     pub funding: Vec<PendingFunding>,
+    /// The finalized program note set. `None` in checkpoints written before
+    /// the set was tracked: the set is then rebuilt from the finalized
+    /// history on restore.
+    #[serde(default)]
+    pub program_notes: Option<ProgramNotesCheckpoint>,
 }
 
 /// How a pending tx was funded: when, and with which channel ops, so a stale
@@ -89,16 +92,16 @@ pub struct PendingFunding {
 
 /// Result of a publish operation.
 ///
-/// `tx` carries the [`PendingTx`] the caller just enqueued — inscriptions or
-/// atomic-withdraw bundles. The tx has been accepted into the sequencer's
-/// pending set and the post is queued onto the drive loop's in-flight pool;
-/// it has not necessarily been delivered to the node yet. Consumers use this
-/// to apply the entry to their local state right away — it won't echo back
-/// in [`ChannelUpdate::adopted`] on chain extension. On a branch change the
-/// full delta is reported, where `this_msg` is the dedup identity.
+/// `tx` carries the [`PendingTx`] the caller just enqueued. The tx has been
+/// accepted into the sequencer's pending set and the post is queued onto the
+/// drive loop's in-flight pool; it has not necessarily been delivered to the
+/// node yet. Consumers use this to apply the entry to their local state right
+/// away — it won't echo back in [`ChannelUpdate::adopted`] on chain extension.
+/// On a branch change the full delta is reported, where `this_msg` is the
+/// dedup identity.
 #[derive(Debug, Clone)]
 pub struct PublishResult {
-    /// The enqueued tx (inscription or atomic withdraw bundle).
+    /// The enqueued tx.
     pub tx: PendingTx,
 }
 
@@ -208,137 +211,23 @@ impl PreparedChannelConfig {
     }
 }
 
-/// A funded atomic channel bundle awaiting external multi-sig signatures.
-///
-/// The multi-sig counterpart of [`publish_atomic_withdraw`] /
-/// [`publish_pin_deposit`]. The caller collects a signature from each required
-/// key holder over `sign_payload`, gathers them into
-/// [`IndexedSignatures`](super::IndexedSignatures), and submits via
-/// [`submit_atomic_bundle`]. The bundled inscription is turn-gated, so prepare
-/// and submit from the current-turn sequencer. `tx`, `transfer_proof`,
-/// `inscribe_sig`, and the bundle metadata are opaque — they carry straight
-/// back into submission.
-///
-/// [`publish_atomic_withdraw`]: super::SequencerHandle::publish_atomic_withdraw
-/// [`publish_pin_deposit`]: super::SequencerHandle::publish_pin_deposit
-/// [`submit_atomic_bundle`]: super::SequencerHandle::submit_atomic_bundle
-#[derive(Debug, Clone)]
-pub struct PreparedAtomicBundle {
-    pub(crate) tx: Ops,
-    pub(crate) transfer_proof: Option<OpProof>,
-    pub(crate) pre_fund: MantleTxBuilder,
-    /// The preparing sequencer's inscription signature — authorized by the
-    /// single round-robin sequencer, not the threshold.
-    pub(crate) inscribe_sig: Ed25519Signature,
-    pub(crate) parent: MsgId,
-    pub(crate) msg_id: MsgId,
-    pub(crate) inscribe: Inscription,
-    pub(crate) signer: Ed25519PublicKey,
-    pub(crate) kind: PreparedBundleKind,
-    /// The exact bytes each accredited key must sign (the funded tx hash's
-    /// signing bytes).
-    pub sign_payload: Vec<u8>,
-    /// The channel's current accredited keys, in index order. Each collected
-    /// signature must be indexed by this key's position here.
-    pub accredited_keys: Vec<UnverifiedEd25519PublicKey>,
-    /// The channel's current `transfer_threshold` — how many of the
-    /// `accredited_keys` must sign to authorize the transfer/withdraw ops.
-    pub signing_threshold: u16,
-}
-
-impl PreparedAtomicBundle {
-    /// Sign this bundle with `signing_key`; see
-    /// [`PreparedChannelConfig::sign_with`]. The payload is derived from
-    /// [`Self::tx`], never taken on trust.
-    pub fn sign_with(&self, signing_key: &Ed25519Key) -> Result<IndexedSignature, Error> {
-        let tx_hash = self.tx.hash();
-        let payload = tx_hash.as_signing_bytes();
-        if payload.as_ref() != self.sign_payload.as_slice() {
-            return Err(Error::Network(
-                "sign_payload does not match the hash of tx; refusing to sign a payload the \
-                 inspected ops do not account for"
-                    .into(),
-            ));
-        }
-        sign_prepared(signing_key, &self.accredited_keys, payload)
-    }
-}
-
-/// The op-specific tail of a [`PreparedAtomicBundle`], carried back into
-/// submission.
-#[derive(Debug, Clone)]
-pub enum PreparedBundleKind {
-    AtomicWithdraw {
-        withdraws: Vec<WithdrawInfo>,
-        outputs: Outputs,
-    },
-    PinDeposit {
-        consumed_notes: Inputs,
-        outputs: Outputs,
-    },
-}
-
-/// One withdraw to bundle atomically with an inscription.
-///
-/// The SDK fills `channel_id` from internal state.
-/// The caller only specifies the outputs (recipients + amounts).
-#[derive(Debug, Clone)]
-pub struct WithdrawArg {
-    pub outputs: Outputs,
-}
-
-/// Which channel notes fund the transfer half of an atomic withdraw.
-///
-/// The withdraw first transfers channel notes to the recipient keys, so the
-/// bundle has to consume enough channel notes to cover the withdrawn amount.
-/// [`Self::Auto`] lets the SDK pick them — covering with the newest notes first
-/// (spending recent notes and preserving the older, matured positions) and
-/// sweeping dust into the remaining input slots to keep the wallet compact.
-/// [`Self::Explicit`] pins an exact input set the caller has chosen — e.g. to
-/// apply its own dust/age policy — which the SDK validates against the tracked
-/// note set. A caller sources those ids from
-/// [`ZoneSequencer::channel_wallet`](super::ZoneSequencer::channel_wallet),
-/// which lists the tracked [`ChannelNote`]s (id, value, pk, slot).
-///
-/// On orphan recovery the input choice need not be reproduced: republish with
-/// `Auto` (reselects the right notes for the new branch) or a fresh `Explicit`
-/// set re-derived from the current `channel_wallet()` view. The rebuilt bundle
-/// re-anchors on the current tip, so the orphaned one can no longer land — the
-/// input set carries no identity of its own.
-#[derive(Debug, Clone)]
-pub enum WithdrawInputs {
-    /// Let the SDK select covering notes from the tracked note set.
-    Auto,
-    /// Use exactly these notes, in this order — typically chosen from
-    /// [`ZoneSequencer::channel_wallet`](super::ZoneSequencer::channel_wallet).
-    Explicit(Vec<NoteId>),
-}
-
 /// A tx reported in a [`ChannelUpdate`]'s `adopted`/`orphaned`.
 ///
 /// Variants mirror the submission flows, so an orphaned entry is recovered with
 /// the method that produced it (the SDK fills a fresh `parent_msg` each time):
 /// - [`ChannelUpdateTx::Inscription`] →
 ///   [`publish`](super::SequencerHandle::publish) with `info.payload`.
-/// - [`ChannelUpdateTx::AtomicWithdraw`] →
-///   [`publish_atomic_withdraw`](super::SequencerHandle::publish_atomic_withdraw)
-///   with `info.inscription.payload` and `WithdrawArg { outputs: info.outputs
-///   }`.
-/// - [`ChannelUpdateTx::PinDeposit`] →
-///   [`publish_pin_deposit`](super::SequencerHandle::publish_pin_deposit) with
-///   `info.inscription.payload` and `info.consumed_notes`, which re-creates the
-///   notes 1:1; `info.outputs` shows whether the original did.
 /// - [`ChannelUpdateTx::Config`] / [`ChannelUpdateTx::Custom`] →
 ///   caller-recovered; the SDK cannot re-sign a multi-sig config or rebuild a
 ///   custom tx, so it never auto-resubmits them.
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "inscriptions are the common entry; boxing them would cost every consumer a deref"
+)]
 pub enum ChannelUpdateTx {
     /// A published message.
     Inscription(InscriptionInfo),
-    /// An atomic inscription+withdraw bundle.
-    AtomicWithdraw(AtomicWithdrawInfo),
-    /// An atomic inscription+transfer bundle pinning an observed deposit.
-    PinDeposit(PinDepositInfo),
     /// A config-only tx (a single `ChannelConfig` op) on the config lineage.
     /// Caller-recovered, like [`Self::Custom`] — never auto-resubmitted.
     Config(SignedOps<Unverified, StandardMode>),
@@ -352,8 +241,6 @@ impl ChannelUpdateTx {
     pub fn tx_hash(&self) -> TxHash {
         match self {
             Self::Inscription(i) => i.tx_hash,
-            Self::AtomicWithdraw(a) => a.tx_hash,
-            Self::PinDeposit(a) => a.tx_hash,
             Self::Config(tx) | Self::Custom(tx) => tx.hash(),
         }
     }
@@ -365,8 +252,6 @@ impl ChannelUpdateTx {
     pub const fn inscription(&self) -> Option<&InscriptionInfo> {
         match self {
             Self::Inscription(i) => Some(i),
-            Self::AtomicWithdraw(a) => Some(&a.inscription),
-            Self::PinDeposit(a) => Some(&a.inscription),
             Self::Config(_) | Self::Custom(_) => None,
         }
     }
@@ -381,11 +266,6 @@ impl ChannelUpdateTx {
 pub struct FundingConfig {
     /// The node wallet key that pays transaction fees.
     pub funding_pk: ZkPublicKey,
-    /// Where an atomic withdraw's transfer change (the overpay beyond the
-    /// withdrawn amount, plus any swept dust) is sent. `None` routes change
-    /// back to [`Self::funding_pk`]; set it to keep the funding key from
-    /// doubling as an implicit custody destination for channel change.
-    pub change_pk: Option<ZkPublicKey>,
     /// Absolute hard cap on the fee of a single funded transaction.
     pub max_tx_fee: GasCost,
     /// Percentage of the final mandatory fee reserved as a priority reserve
@@ -484,19 +364,39 @@ pub enum Error {
     #[error("network error: {0}")]
     Network(String),
     /// The channel moved under the submission: the position it chains on
-    /// already has a pending continuation, or, for a prepared bundle, the
-    /// config (keys/threshold the signatures were collected under) or the
-    /// message tip changed since prepare. Recoverable: re-prepare on the
-    /// channel's current state and re-collect signatures.
+    /// already has a pending continuation, or, for a prepared config, the
+    /// keys and threshold the signatures were collected under changed since
+    /// prepare. Recoverable: re-prepare on the channel's current state and
+    /// re-collect signatures.
     #[error("channel state changed: {0}")]
     ChannelStateChanged(String),
-    /// The channel state is unchanged since prepare, yet the bundle's
-    /// signatures would never verify on the ledger: the bundled inscription
-    /// was signed by another sequencer, or the collected set is malformed
-    /// (wrong count, index outside the accredited keys, or a signature that
-    /// fails against its key). Not recoverable by retrying.
-    #[error("bundle signatures rejected: {0}")]
+    /// The channel state is unchanged since prepare, yet the collected
+    /// signatures would never verify on the ledger: wrong count, an index
+    /// outside the accredited keys, or a signature that fails against its
+    /// key. Not recoverable by retrying.
+    #[error("signatures rejected: {0}")]
     InvalidMultiSig(String),
+    /// The step proofs do not fit the steps of the inscription.
+    #[error("step proofs rejected: {0}")]
+    InvalidStepProofs(String),
+    /// A block's update of the channel's note set could not be applied, so
+    /// the tracked set would no longer match the ledger's. The block is not
+    /// recorded.
+    #[error("channel note set: {0}")]
+    NoteSet(String),
+    /// The program key is not a valid Groth16 verification key; the ledger
+    /// would reject the registration. Not recoverable by retrying.
+    #[error("program key rejected: {0}")]
+    InvalidProgramKey(String),
+    /// A program step cannot be built as specified: it consumes a note the
+    /// sequencer does not hold spendable, its values do not balance, or
+    /// its mini-block breaks the ledger's rules. Not recoverable by
+    /// retrying.
+    #[error("program step rejected: {0}")]
+    InvalidProgramStep(String),
+    /// The `ZkProgramSpend` prover failed.
+    #[error("prover error: {0}")]
+    Prover(String),
 }
 
 /// Events emitted by the sequencer.
@@ -521,7 +421,7 @@ pub enum Error {
 )]
 pub enum Event {
     /// Fires per ingested block. Carries how the channel view moved
-    /// (`channel_update`), the deposits that turned canonical with it, and
+    /// (`channel_update`), the ops that turned canonical with it, and
     /// the finalized txs; any of them may be empty. Cold-start
     /// backfill emits one `BlocksProcessed` per batch with an empty
     /// [`ChannelUpdate::Extension`]: it walks finalized history, so there is
@@ -529,17 +429,12 @@ pub enum Event {
     BlocksProcessed {
         checkpoint: SequencerCheckpoint,
         channel_update: ChannelUpdate,
-        /// Channel deposits observed in the blocks this event covers, in
-        /// block and op order. Surfaced non-finalized so a consumer can pin a
-        /// deposit without waiting for finalization, via
-        /// [`publish_pin_deposit`](super::SequencerHandle::publish_pin_deposit).
+        /// Channel deposits and program registrations in the blocks this
+        /// event covers, in block and op order, before finality.
         ///
         /// Observations, not view: reconcile against branch state, a branch
-        /// change can re-surface the same deposit or reorg it out. Pin a
-        /// deposit only while it is on the current branch and no bundle
-        /// consuming it is in flight; the pin's transfer consumes the
-        /// deposited note, so it can only land where the deposit is.
-        deposits: Vec<DepositInfo>,
+        /// change can re-surface the same op or reorg it out.
+        observed: Vec<ObservedOp>,
         finalized: Vec<FinalizedTx>,
     },
     /// The sequencer is connected and ready to publish. Emitted once when
@@ -591,9 +486,8 @@ pub enum ChannelUpdate {
         /// consumer state at publish time and don't echo back.
         adopted: Vec<ChannelUpdateTx>,
     },
-    /// Entries left the view: a competing entry took their parent, a
-    /// competing spend took a bundle's inputs, or a config change invalidated
-    /// the pending tail. `orphaned` is never empty.
+    /// Entries left the view: a competing entry took their parent, or a
+    /// config change invalidated the pending tail. `orphaned` is never empty.
     Conflict {
         /// The non-finalized view at the new tip minus `adopted`, in lineage
         /// order: mined entries from LIB to the fork point, then the pending
@@ -704,62 +598,26 @@ pub struct InscriptionInfo {
     /// `None` for a channel-config entry, which is authorized by a threshold of
     /// keys rather than a single signer and carries no author.
     pub signer: Option<UnverifiedEd25519PublicKey>,
+    /// The steps of the inscription.
+    pub steps: InscriptionSteps,
 }
 
-/// A channel withdraw observed on chain or bundled in a pending atomic tx.
+/// A channel withdraw observed on chain: a holder taking its channel notes
+/// back to the ledger, effective at its due slot.
 #[derive(Debug, Clone)]
 pub struct WithdrawInfo {
-    /// Transaction hash that contained this withdraw op. For bundled
-    /// withdraws inside [`AtomicWithdrawInfo`] this equals the bundle's
-    /// `tx_hash`; for standalone withdraws surfaced via
-    /// [`FinalizedOp::Withdraw`] this is the source tx.
+    /// Transaction hash that contained this withdraw op.
     pub tx_hash: TxHash,
-    /// The withdraw op (`channel_id`, inputs).
+    /// The withdraw op: channel, consumed nullifiers, created commitments and
+    /// the root it was proven against.
     pub op: ChannelWithdrawOp,
-}
-
-/// An inscription bundled atomically with one or more withdraws in a single
-/// `MantleTx`. All ops in this tx adopt/orphan/finalize as a unit.
-#[derive(Debug, Clone)]
-pub struct AtomicWithdrawInfo {
-    /// Transaction hash of the bundled `MantleTx`.
-    pub tx_hash: TxHash,
-    /// The inscription op carried by the bundle.
-    pub inscription: InscriptionInfo,
-    /// The withdraw ops carried by the bundle, in tx order.
-    pub withdraws: Vec<WithdrawInfo>,
-    /// The recipient notes the bundle releases (the transfer outputs the
-    /// withdraw consumes, change excluded). Enough to re-issue the bundle from
-    /// its orphan report as a single [`WithdrawArg`] — the note IDs in
-    /// `withdraws[i].op.inputs` alone can't recover the recipient value + key.
-    pub outputs: Outputs,
-}
-
-/// An inscription bundled atomically with a channel transfer that consumes an
-/// observed deposited note, in a single `MantleTx`. The transfer makes the
-/// inscription conditional on the deposit being on chain: if the deposit is not
-/// present the consumed note does not exist, the transfer fails, and the whole
-/// tx (inscription included) fails. All ops adopt/orphan/finalize as a unit.
-#[derive(Debug, Clone)]
-pub struct PinDepositInfo {
-    /// Transaction hash of the bundled `MantleTx`.
-    pub tx_hash: TxHash,
-    /// The inscription op carried by the bundle.
-    pub inscription: InscriptionInfo,
-    /// The channel notes the bundled transfer consumes (the deposit being
-    /// pinned). Recovering an orphaned bundle re-supplies these.
-    pub consumed_notes: Inputs,
-    /// The notes the bundled transfer re-creates, in op order. A
-    /// `publish_pin_deposit` bundle re-creates `consumed_notes` 1:1; a
-    /// custom-built one may not.
-    pub outputs: Outputs,
 }
 
 /// A channel deposit observed in an L1 block.
 ///
-/// Sequencers do not publish deposits — these are pure observations enriched
-/// with the deposit `amount` from the chain events API. Reported in
-/// `BlocksProcessed::deposits` each time its block joins the canonical chain,
+/// Sequencers do not publish deposits — these are pure observations, the
+/// holder moving its own ledger notes into the channel. Reported in
+/// `BlocksProcessed::observed` each time its block joins the canonical chain,
 /// like an adopted inscription, and in `finalized` once final.
 #[derive(Debug, Clone)]
 pub struct DepositInfo {
@@ -769,81 +627,91 @@ pub struct DepositInfo {
     pub op_id: Hash,
     /// Target channel.
     pub channel_id: ChannelId,
-    /// Notes consumed by the deposit (spent-once at the UTXO layer).
-    pub inputs: Inputs,
-    /// The channel notes the deposit re-created its inputs as, sourced from
-    /// the block's events. These carry new `NoteId`s and are what the channel
-    /// now owns.
-    pub notes: DepositRecreatedNotes,
-    /// Total value deposited, sourced from the block's events.
-    pub amount: Value,
+    /// The channel notes the deposit created, as commitments, sourced from
+    /// the block's events. Their values and holders are private.
+    pub outputs: OutputCommitments,
     /// Opaque metadata associated with this deposit.
     pub metadata: Metadata,
 }
 
-/// A channel transfer observed on chain: channel notes consumed and
-/// re-created under new keys/denominations by the channel committee.
-#[derive(Debug, Clone)]
-pub struct ChannelTransferInfo {
-    /// Transaction hash that contained this transfer op.
+/// A program registration observed in an L1 block, by anyone: programs are
+/// global, and a zone waits for the one it uses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgramRegisterInfo {
+    /// The transaction hash containing this registration op.
     pub tx_hash: TxHash,
-    /// The transfer op (`channel_id`, inputs, outputs).
-    pub op: ChannelTransferOp,
+    /// The program's id, derived from its key: registering the same key
+    /// again registers nothing.
+    pub program_id: ProgramId,
+    /// The Groth16 verification key the program's step proofs verify under.
+    pub verification_key: ProgramVerificationKey,
 }
 
-/// A note owned by the channel, as reconstructed from block data.
+/// An op observed on the canonical branch before finality.
 ///
-/// Every note carries its exact `value`, owning `pk`, and creation `slot`:
-/// deposits publish value and pk per note in the deposit event
-/// (`TxEventPayload::Deposit`), `ChannelTransfer` outputs carry full notes, and
-/// the slot comes from the block the note was created in. Tracking each note
-/// individually — rather than as an aggregate group — is what lets a withdrawal
-/// client apply a per-note dust policy (by value and age) under a
-/// permissionless deposit stream.
+/// Reported each time its block joins the canonical chain, so a branch
+/// change can report one again; never reported as removed. Dedup a deposit
+/// by `(tx_hash, op_id)` and a registration by `program_id`.
+#[derive(Debug, Clone)]
+pub enum ObservedOp {
+    /// A holder's deposit into the channel.
+    Deposit(DepositInfo),
+    /// A program registration, by anyone.
+    ProgramRegister(ProgramRegisterInfo),
+}
+
+/// A program note of the channel, with what a program step needs to spend
+/// it: its opening and its path in the channel's commitment MMR, current at
+/// the view's root.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ChannelNote {
-    pub note_id: NoteId,
-    /// The note's value.
-    pub value: Value,
-    /// The key holding the note's `PoS` participation power.
-    pub pk: ZkPublicKey,
-    /// The block slot the note was created in — its age reference. A note's age
-    /// at any tip is that tip's slot minus this. Chain-anchored, so it is
-    /// deterministic and survives sequencer restarts.
-    pub slot: Slot,
+pub struct ProgramNote {
+    pub commitment: NoteCommitment,
+    /// The program holding the note.
+    #[serde(with = "serde_fr")]
+    pub program: ProgramId,
+    pub opening: ProgramNoteOpening,
+    /// Public: every program note hangs off the key of the secret `0`.
+    pub nullifier: NoteNullifier,
+    pub path: MerklePath,
 }
 
-/// The channel's note set as tracked from block data.
+/// The channel's program notes at a tip.
 ///
-/// `finalized` holds notes created below LIB and unspent at the tracked tip
-/// — immune to reorgs. `unfinalized` holds notes created above LIB on the
-/// tracked branch; they can disappear on a branch change (their ids are
-/// branch-stable, so a re-included op recreates the same ids).
-#[derive(Debug, Clone, Default)]
-pub struct ChannelWalletView {
-    pub finalized: Vec<ChannelNote>,
-    pub unfinalized: Vec<ChannelNote>,
+/// `finalized` holds the notes also in the finalized set, immune to reorgs;
+/// `unfinalized` the ones created above LIB on the tip's branch. The paths
+/// are against `root`, the channel's commitment MMR root at the tip.
+///
+/// `spendable` names the notes a step prepared at this tip may consume: the
+/// ones [`SPEND_ROOT_DEPTH`](lb_wallet::SPEND_ROOT_DEPTH) blocks deep, the
+/// depth every wallet spend names its root at. A younger note is listed but
+/// refused until then.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgramNotesView {
+    pub root: Fr,
+    pub finalized: Vec<ProgramNote>,
+    pub unfinalized: Vec<ProgramNote>,
+    pub spendable: HashSet<NoteCommitment>,
+}
+
+/// The finalized program note set, as a checkpoint carries it: the channel's
+/// commitment MMR at LIB and the program notes with their paths at that root.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ProgramNotesCheckpoint {
+    pub commitments: CommitmentMmr,
+    pub notes: Vec<ProgramNote>,
 }
 
 /// A tx enqueued for posting and surfaced as a publish return value or in
 /// orphan payloads.
 ///
-/// Either our own pending publish (inscription / atomic withdraw bundle), or
-/// a pending bundle reconstructed on checkpoint resume. Returned from publish
-/// methods and carried by [`ChannelUpdateTx`] adjacent contexts. The "pending"
-/// framing reflects that the tx has been accepted into local pending state
-/// and queued for posting, not that the node has accepted it yet — see
-/// [`PublishResult`].
+/// Our own pending publish, returned from publish methods and carried by
+/// [`ChannelUpdateTx`] adjacent contexts. The "pending" framing reflects that
+/// the tx has been accepted into local pending state and queued for posting,
+/// not that the node has accepted it yet — see [`PublishResult`].
 #[derive(Debug, Clone)]
 pub enum PendingTx {
     /// A plain inscription published via `publish`.
     Inscription(InscriptionInfo),
-    /// A bundled inscription+withdraw(s) published via
-    /// `publish_atomic_withdraw`.
-    AtomicWithdraw(AtomicWithdrawInfo),
-    /// A bundled inscription+transfer pinning an observed deposit,
-    /// published via `publish_pin_deposit`.
-    PinDeposit(PinDepositInfo),
 }
 
 impl PendingTx {
@@ -852,8 +720,6 @@ impl PendingTx {
     pub const fn tx_hash(&self) -> TxHash {
         match self {
             Self::Inscription(i) => i.tx_hash,
-            Self::AtomicWithdraw(a) => a.tx_hash,
-            Self::PinDeposit(a) => a.tx_hash,
         }
     }
 
@@ -862,8 +728,6 @@ impl PendingTx {
     pub const fn inscription(&self) -> &InscriptionInfo {
         match self {
             Self::Inscription(i) => i,
-            Self::AtomicWithdraw(a) => &a.inscription,
-            Self::PinDeposit(a) => &a.inscription,
         }
     }
 }
@@ -891,20 +755,16 @@ pub struct FinalizedTx {
 pub enum FinalizedOp {
     /// Any inscription on the channel — ours or another sequencer's.
     Inscription(InscriptionInfo),
-    /// A finalized L1 deposit on the channel, with `amount` populated from
-    /// the chain events API.
+    /// A finalized L1 deposit on the channel, with the commitments it created.
     Deposit(DepositInfo),
-    /// A withdraw op on the channel — standalone or part of an atomic
-    /// inscription+withdraw bundle (the bundling is implicit via the parent
-    /// [`FinalizedTx::tx_hash`]).
+    /// A holder's withdraw op on the channel.
     Withdraw(WithdrawInfo),
     /// A config on the channel, with the keys and rules it set.
     /// `parent_msg`/`this_msg` are config-lineage ids, not message-lineage
     /// ids.
     Config(ConfigInfo),
-    /// A channel transfer op on the channel: notes re-keyed/re-denominated
-    /// under channel authority.
-    ChannelTransfer(ChannelTransferInfo),
+    /// A program registration, by anyone.
+    ProgramRegister(ProgramRegisterInfo),
 }
 
 #[cfg(test)]
@@ -914,7 +774,7 @@ mod tests {
     use lb_core::mantle::{
         Op,
         channel::{SlotTimeframe, SlotTimeout},
-        ledger::{BoundedInputs, NoteId},
+        notes::NoteNullifier,
         ops::channel::{
             ChannelId, MsgId, VerifiedChannelKeys, config::ChannelConfigOp,
             withdraw::ChannelWithdrawOp,
@@ -941,7 +801,6 @@ mod tests {
             SlotTimeframe::from(15),
             SlotTimeout::from(3),
             NonZero::<u16>::MIN,
-            NonZero::new(2).unwrap(),
         )
         .unwrap()
     }
@@ -1012,7 +871,9 @@ mod tests {
         // signature over the tx hash would authorize both.
         let smuggled = Op::ChannelWithdraw(ChannelWithdrawOp {
             channel_id: ChannelId::from([7; 32]),
-            inputs: BoundedInputs::from(NoteId::from(Fr::from(1u64))).into(),
+            inputs: [NoteNullifier(Fr::from(1u64))].into(),
+            outputs: [].into(),
+            commitment_merkle_root: Fr::from(2u64),
         });
         let tx = Ops::new(
             FORK_DIGEST,

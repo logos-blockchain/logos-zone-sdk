@@ -152,7 +152,6 @@ pub async fn replay_finalized_history(
     // turn-gated), so the funding wallet is never exercised.
     let funding = FundingConfig {
         funding_pk: lb_groth16::Fr::from(1u64).into(),
-        change_pk: None,
         max_tx_fee: GasCost::new(u64::MAX),
         priority_fee_percent: FundingConfig::DEFAULT_PRIORITY_FEE_PERCENT,
     };
@@ -292,217 +291,6 @@ async fn count_indexed_payload(
     )
 }
 
-/// Polls until the wallet holds exactly the given number of finalized and
-/// unfinalized notes — an exact-count check that catches double-counting.
-pub async fn wait_for_channel_wallet_counts(
-    client: &SequencerClient,
-    finalized: usize,
-    unfinalized: usize,
-    duration: Duration,
-) -> Result<(), ZoneTestError> {
-    timeout(duration, async {
-        loop {
-            let view =
-                client
-                    .channel_wallet()
-                    .await
-                    .map_err(|error| ZoneTestError::ChannelWallet {
-                        message: error.to_string(),
-                    })?;
-            if view.finalized.len() == finalized && view.unfinalized.len() == unfinalized {
-                return Ok(());
-            }
-            sleep(Duration::from_millis(500)).await;
-        }
-    })
-    .await
-    .map_err(|_| ZoneTestError::ChannelWalletTimeout)?
-}
-
-/// Polls the sequencer's channel wallet until a note of `value` is present.
-/// With `finalized_only`, only the finalized layer counts.
-pub async fn wait_for_channel_wallet_note(
-    client: &SequencerClient,
-    value: Value,
-    finalized_only: bool,
-    duration: Duration,
-) -> Result<(), ZoneTestError> {
-    timeout(duration, async {
-        loop {
-            let view =
-                client
-                    .channel_wallet()
-                    .await
-                    .map_err(|error| ZoneTestError::ChannelWallet {
-                        message: error.to_string(),
-                    })?;
-            let unfinalized = (!finalized_only)
-                .then_some(view.unfinalized.iter())
-                .into_iter()
-                .flatten();
-            if view
-                .finalized
-                .iter()
-                .chain(unfinalized)
-                .any(|note| note.value == value)
-            {
-                return Ok(());
-            }
-            sleep(Duration::from_millis(500)).await;
-        }
-    })
-    .await
-    .map_err(|_| ZoneTestError::ChannelWalletTimeout)?
-}
-
-/// Waits until the finalized channel history contains the expected channel
-/// deposit, including its amount.
-pub async fn wait_for_deposit(
-    reader: &ZoneReaderConfig,
-    expected: &DepositOp,
-    expected_amount: Value,
-    duration: Duration,
-) -> Result<(), ZoneTestError> {
-    poll_replayed_history_until(reader, duration, ZoneTestError::IndexerTimeout, |op| {
-        matches!(op, FinalizedOp::Deposit(deposit)
-            if deposit.inputs == expected.inputs
-                && deposit.amount == expected_amount
-                && deposit.metadata == expected.metadata)
-    })
-    .await
-}
-
-/// Waits until the finalized channel history contains the expected withdraw.
-pub async fn wait_for_withdraw(
-    reader: &ZoneReaderConfig,
-    expected: &ChannelWithdrawOp,
-    timeout_duration: Duration,
-) -> Result<(), ZoneTestError> {
-    poll_replayed_history_until(
-        reader,
-        timeout_duration,
-        ZoneTestError::WithdrawTimeout,
-        |op| matches!(op, FinalizedOp::Withdraw(withdraw) if withdraw.op.inputs == expected.inputs),
-    )
-    .await
-}
-
-/// Waits until the finalized channel history contains a channel transfer whose
-/// input set has exactly `expected_inputs` notes.
-///
-/// This is the on-chain record of the withdrawal's note selection: in the
-/// dust-flood scenario it proves best-fit largest-first consumed a single
-/// covering note rather than sweeping the >255-note dust flood into a transfer
-/// the ledger would reject.
-pub async fn wait_for_channel_transfer_input_count(
-    reader: &ZoneReaderConfig,
-    expected_inputs: usize,
-    timeout_duration: Duration,
-) -> Result<(), ZoneTestError> {
-    poll_replayed_history_until(
-        reader,
-        timeout_duration,
-        ZoneTestError::IndexerTimeout,
-        move |op| {
-            matches!(op, FinalizedOp::ChannelTransfer(transfer)
-                if transfer.op.inputs.len() == expected_inputs)
-        },
-    )
-    .await
-}
-
-async fn poll_replayed_history_until(
-    reader: &ZoneReaderConfig,
-    duration: Duration,
-    timeout_error: ZoneTestError,
-    mut predicate: impl FnMut(&FinalizedOp) -> bool,
-) -> Result<(), ZoneTestError> {
-    timeout(duration, async {
-        loop {
-            let history = replay_finalized_history(reader).await?;
-            if history
-                .iter()
-                .flat_map(|tx| tx.ops.iter())
-                .any(&mut predicate)
-            {
-                return Ok(());
-            }
-
-            sleep(Duration::from_millis(500)).await;
-        }
-    })
-    .await
-    .map_err(|_| timeout_error)?
-}
-
-/// Waits until the sequencer's event stream surfaces the expected deposit
-/// in [`Event::BlocksProcessed::finalized`] (matched by `inputs`, `amount`,
-/// and `metadata`). Drains the events channel as it goes — call this after
-/// any earlier event consumers in the scenario have moved past the relevant
-/// publish events.
-pub async fn wait_for_finalized_deposit_via_sequencer(
-    events: &mut tokio::sync::broadcast::Receiver<Event>,
-    expected: &DepositOp,
-    expected_amount: Value,
-    duration: Duration,
-) -> Result<(), ZoneTestError> {
-    poll_sequencer_finalized_until(events, duration, ZoneTestError::IndexerTimeout, |op| {
-        matches!(op, FinalizedOp::Deposit(d)
-            if d.inputs == expected.inputs
-                && d.amount == expected_amount
-                && d.metadata == expected.metadata)
-    })
-    .await
-}
-
-/// Waits until the sequencer's event stream surfaces the expected withdraw
-/// (matched by `outputs`). Drains the events channel as it goes.
-pub async fn wait_for_finalized_withdraw_via_sequencer(
-    events: &mut tokio::sync::broadcast::Receiver<Event>,
-    expected: &ChannelWithdrawOp,
-    duration: Duration,
-) -> Result<(), ZoneTestError> {
-    poll_sequencer_finalized_until(
-        events,
-        duration,
-        ZoneTestError::WithdrawTimeout,
-        |op| matches!(op, FinalizedOp::Withdraw(w) if w.op.inputs == expected.inputs),
-    )
-    .await
-}
-
-async fn poll_sequencer_finalized_until(
-    events: &mut tokio::sync::broadcast::Receiver<Event>,
-    duration: Duration,
-    timeout_error: ZoneTestError,
-    mut predicate: impl FnMut(&FinalizedOp) -> bool,
-) -> Result<(), ZoneTestError> {
-    timeout(duration, async {
-        loop {
-            let event = match events.recv().await {
-                Ok(event) => event,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    warn!("event subscriber lagged by {n}, recovering");
-                    continue;
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    return Err(ZoneTestError::SequencerStopped);
-                }
-            };
-            let Event::BlocksProcessed { finalized, .. } = event else {
-                continue;
-            };
-            for tx in finalized {
-                if tx.ops.iter().any(&mut predicate) {
-                    return Ok(());
-                }
-            }
-        }
-    })
-    .await
-    .map_err(|_| timeout_error)?
-}
-
 /// Waits until node mempool/chain observation confirms the submitted zone
 /// transactions reached the canonical chain.
 pub async fn ensure_zone_transactions_included(
@@ -638,4 +426,114 @@ pub async fn wait_for_lib_advance(
     })
     .await
     .map_err(|_| ZoneTestError::LibAdvanceTimeout)?
+}
+
+/// Registers `verification_key` through the sequencer, retrying while the
+/// node wallet has not caught up with the notes a previous tx left it.
+pub async fn register_program_with_retry(
+    client: &SequencerClient,
+    verification_key: &ProgramVerificationKey,
+    deadline: PublishDeadline,
+) -> Result<(ProgramRegisterInfo, SequencerCheckpoint), ZoneTestError> {
+    loop {
+        if deadline.is_expired() {
+            return Err(ZoneTestError::PublishTimeout);
+        }
+        match client.register_program(verification_key.clone()).await {
+            Ok(registered) => return Ok(registered),
+            Err(error) => {
+                warn!(error = %error, "Zone sequencer register_program failed, retrying");
+                sleep(Duration::from_millis(500)).await;
+            }
+        }
+    }
+}
+
+/// Waits until the finalized channel history replayed from the indexer
+/// carries the registration of `program_id`.
+pub async fn wait_for_finalized_program(
+    reader: &ZoneReaderConfig,
+    program_id: ProgramId,
+    duration: Duration,
+) -> Result<(), ZoneTestError> {
+    timeout(duration, async {
+        loop {
+            let registered = replay_finalized_history(reader)
+                .await?
+                .iter()
+                .flat_map(|tx| tx.ops.iter())
+                .any(|op| matches!(op, FinalizedOp::ProgramRegister(p) if p.program_id == program_id));
+            if registered {
+                return Ok(());
+            }
+            sleep(Duration::from_millis(500)).await;
+        }
+    })
+    .await
+    .map_err(|_| ZoneTestError::IndexerTimeout)?
+}
+
+/// Waits until the sequencer's event stream reports the registration of
+/// `program_id` observed on the canonical branch.
+pub async fn wait_for_observed_program(
+    events: &mut tokio::sync::broadcast::Receiver<Event>,
+    program_id: ProgramId,
+    duration: Duration,
+) -> Result<(), ZoneTestError> {
+    wait_for_block_event(events, duration, |observed, _| {
+        observed
+            .iter()
+            .any(|op| matches!(op, ObservedOp::ProgramRegister(p) if p.program_id == program_id))
+    })
+    .await
+}
+
+/// Waits until the sequencer's event stream reports the registration of
+/// `program_id` finalized.
+pub async fn wait_for_finalized_program_via_sequencer(
+    events: &mut tokio::sync::broadcast::Receiver<Event>,
+    program_id: ProgramId,
+    duration: Duration,
+) -> Result<(), ZoneTestError> {
+    wait_for_block_event(events, duration, |_, finalized| {
+        finalized
+            .iter()
+            .flat_map(|tx| tx.ops.iter())
+            .any(|op| matches!(op, FinalizedOp::ProgramRegister(p) if p.program_id == program_id))
+    })
+    .await
+}
+
+/// Drains `events` until a `BlocksProcessed` satisfies `found` on its
+/// observed and finalized ops.
+async fn wait_for_block_event(
+    events: &mut tokio::sync::broadcast::Receiver<Event>,
+    duration: Duration,
+    mut found: impl FnMut(&[ObservedOp], &[FinalizedTx]) -> bool,
+) -> Result<(), ZoneTestError> {
+    timeout(duration, async {
+        loop {
+            let event = match events.recv().await {
+                Ok(event) => event,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    warn!("event subscriber lagged by {n}, recovering");
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    return Err(ZoneTestError::SequencerStopped);
+                }
+            };
+            if let Event::BlocksProcessed {
+                observed,
+                finalized,
+                ..
+            } = event
+                && found(&observed, &finalized)
+            {
+                return Ok(());
+            }
+        }
+    })
+    .await
+    .map_err(|_| ZoneTestError::IndexerTimeout)?
 }

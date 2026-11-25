@@ -38,7 +38,6 @@ jobs:
       # binary is built from the pinned node revision below and handed over
       # explicitly, as the node repository's lane does with its own build.
       LOGOS_BLOCKCHAIN_NODE_BIN: ${{ github.workspace }}/target/node/bin/logos-blockchain-node
-      PASSWORD_MANAGER_BIN: ${{ github.workspace }}/target/debug/examples/password_manager
 
     steps:
       - name: Expose gmp to cargo (macOS runners)
@@ -79,9 +78,6 @@ jobs:
           --root target/node
           logos-blockchain-node
 
-      - name: Build the password manager example
-        run: cargo build --locked -p logos-sql --example password_manager
-
       # Special exclusion tags, as in the node repository (we want to run the rest of the tests and not fail the workflow):
       # - @broken = tests that are broken and must still be fixed
       # - @undefined_behaviour = tests that trigger undefined system-level behaviour in the logos-blockchain-node binary
@@ -98,26 +94,3 @@ jobs:
           artifact_subdir: "Zone SDK"
           max_concurrent_scenarios: "1"
 
-      # Feature: Logos SQL (@logos_sql_ci)
-      - name: Run cucumber suite - Logos SQL
-        timeout-minutes: 60
-        uses: ./.github/actions/run-cucumber-suite
-        with:
-          suite_tag: "@logos_sql_ci"
-          package: logos-blockchain-sql-tests
-          suite_name: logos-sql
-          artifacts_dir: tests/logos-sql/cucumber_tests/temp
-          artifact_subdir: "Logos SQL"
-          max_concurrent_scenarios: "1"
-
-      # Feature: Password manager (@password_manager), driving the example executable built above
-      - name: Run cucumber suite - password manager
-        timeout-minutes: 30
-        uses: ./.github/actions/run-cucumber-suite
-        with:
-          suite_tag: "@password_manager"
-          package: logos-blockchain-sql-tests
-          suite_name: password-manager
-          artifacts_dir: tests/logos-sql/cucumber_tests/temp
-          artifact_subdir: "Password manager"
-          max_concurrent_scenarios: "1"
