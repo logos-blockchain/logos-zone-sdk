@@ -9,7 +9,7 @@ use lb_core::{
     mantle::{
         SignedOps,
         ledger::verification_mode::StandardMode,
-        notes::NoteNullifier,
+        notes::{NoteCommitment, NoteNullifier},
         ops::{
             OpRef, StepProof,
             channel::{ChannelId, MsgId, inscribe::Inscription},
@@ -45,7 +45,7 @@ use super::{
     program_notes::{BlockNoteSet, ProgramNoteSet, program_step_inputs},
     types::{
         ChannelUpdateTx, Error, InscriptionInfo, ObservedOp, PendingFunding, PendingTx,
-        ProgramNotesCheckpoint, ProgramNotesView,
+        ProgramNote, ProgramNotesCheckpoint, ProgramNotesView,
     },
 };
 use crate::{InscriptionSteps, inscribes};
@@ -1514,10 +1514,17 @@ impl TxState {
     pub fn program_notes(&self, tip: Option<HeaderId>) -> ProgramNotesView {
         let mut view = self.blocks.program_notes_at(tip);
         let spent = self.pending_program_inputs(tip);
-        view.finalized
-            .retain(|note| !spent.contains(&note.nullifier));
-        view.unfinalized
-            .retain(|note| !spent.contains(&note.nullifier));
+        let unspent = |note: &ProgramNote| !spent.contains(&note.nullifier);
+        view.finalized.retain(unspent);
+        view.unfinalized.retain(unspent);
+        let offered: HashSet<NoteCommitment> = view
+            .finalized
+            .iter()
+            .chain(&view.unfinalized)
+            .map(|note| note.commitment)
+            .collect();
+        view.spendable
+            .retain(|commitment| offered.contains(commitment));
         view
     }
 
@@ -1896,6 +1903,13 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(offered(&state), [commitment(2)], "note 1 is spoken for");
+        assert!(
+            !state
+                .program_notes(Some(block1))
+                .spendable
+                .contains(&commitment(1)),
+            "a spoken-for note is not spendable either"
+        );
 
         // Mined on the branch, the pending step no longer reserves its input;
         // the block that mined it consumed the note on chain.

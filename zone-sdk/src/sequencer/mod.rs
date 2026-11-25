@@ -105,7 +105,8 @@ pub use tx_builder::sign_prepared;
 pub use types::{
     ChannelUpdate, ChannelUpdateTx, ConfigInfo, DepositInfo, Error, Event, FinalizedOp,
     FinalizedTx, FundingConfig, InscriptionId, InscriptionInfo, ObservedOp, PendingFunding,
-    PendingTx, PreparedChannelConfig, ProgramRegisterInfo, PublishResult, SequencerChannelView,
-    SequencerCheckpoint, SequencerConfig, TurnNotification, WithdrawInfo,
+    PendingTx, PreparedChannelConfig, ProgramNote, ProgramNotesCheckpoint, ProgramNotesView,
+    ProgramRegisterInfo, PublishResult, SequencerChannelView, SequencerCheckpoint, SequencerConfig,
+    TurnNotification, WithdrawInfo,
 };
 pub use zone_sequencer::ZoneSequencer;

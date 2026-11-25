@@ -135,7 +135,8 @@ impl ProgramNotesView {
     /// The view of an empty set: the empty MMR's root and no notes.
     #[must_use]
     pub fn empty() -> Self {
-        ProgramNoteSet::default().view(&ProgramNoteSet::default())
+        let empty = ProgramNoteSet::default();
+        empty.view(&empty, &empty)
     }
 }
 
@@ -252,7 +253,7 @@ impl ProgramNoteSet {
     /// The set at `self`'s root, split into the notes also in `finalized`
     /// and the rest.
     #[must_use]
-    pub fn view(&self, finalized: &Self) -> ProgramNotesView {
+    pub fn view(&self, finalized: &Self, spend: &Self) -> ProgramNotesView {
         let (finalized, unfinalized) = self
             .notes()
             .cloned()
@@ -261,6 +262,11 @@ impl ProgramNoteSet {
             root: self.root(),
             finalized,
             unfinalized,
+            spendable: spend
+                .notes()
+                .map(|note| note.commitment)
+                .filter(|commitment| self.contains(commitment))
+                .collect(),
         }
     }
 
@@ -418,7 +424,7 @@ mod tests {
             .apply(&block(&[], &[1], &[]))
             .unwrap();
         let branch = finalized.apply(&block(&[], &[2], &[])).unwrap();
-        let view = branch.view(&finalized);
+        let view = branch.view(&finalized, &branch);
         assert_eq!(view.root, branch.root());
         assert_eq!(
             view.finalized
@@ -437,7 +443,7 @@ mod tests {
 
         let restored = ProgramNoteSet::from_checkpoint(branch.to_checkpoint());
         assert_eq!(restored.root(), branch.root());
-        assert_eq!(restored.view(&finalized), view);
+        assert_eq!(restored.view(&finalized, &restored), view);
     }
 
     #[test]

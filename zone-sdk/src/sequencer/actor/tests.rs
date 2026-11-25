@@ -2690,6 +2690,10 @@ async fn prepare_program_inscription_spends_the_tracked_notes_and_submits() {
     }
     let view = sequencer.handle().program_notes();
     assert_eq!(view.unfinalized.len(), 1, "the note is tracked at the tip");
+    assert!(
+        view.spendable.contains(&commitment),
+        "at spend depth the view offers the note as spendable"
+    );
 
     let payee = ZkPublicKey::new(Fr::from(5u64));
     let built = sequencer

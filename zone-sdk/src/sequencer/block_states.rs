@@ -420,7 +420,7 @@ impl BlockStates {
     pub fn program_notes_at(&self, tip: Option<HeaderId>) -> ProgramNotesView {
         tip.and_then(|tip| self.block_states.get(&tip))
             .map_or(&self.finalized.notes, |state| &state.notes)
-            .view(&self.finalized.notes)
+            .view(&self.finalized.notes, &self.program_spend_set(tip))
     }
 
     /// The program notes a step prepared at `tip` spends, at the root it
@@ -799,9 +799,57 @@ mod tests {
             assert!(note.path.verify::<ZkHasher>(note.commitment.0, at_b.root));
         }
         assert_eq!(
+            at_b.spendable,
+            [commitment(1)].into(),
+            "the note created at the tip is not yet spendable"
+        );
+        assert_eq!(
             blocks.program_notes_at(None).root,
             finalized.root(),
             "no tip reads the finalized set"
+        );
+    }
+
+    /// The view lists every note at the tip but marks spendable only the
+    /// ones `SPEND_ROOT_DEPTH` blocks deep.
+    #[test]
+    fn spendable_notes_are_the_ones_at_spend_depth() {
+        let genesis = header_id(0);
+        let mut blocks = BlockStates::new(genesis, MsgId::root());
+        let finalized = ProgramNoteSet::default()
+            .apply(&block(&[], &[1], &[]))
+            .unwrap();
+        blocks.restore_finalized_program_notes(finalized.to_checkpoint());
+        let tip = 1 + SPEND_ROOT_DEPTH as u8;
+        for n in 1..=tip {
+            let created: &[u64] = match n {
+                1 => &[2],
+                n if n == tip => &[3],
+                _ => &[],
+            };
+            blocks
+                .insert(
+                    header_id(n),
+                    header_id(n - 1),
+                    [],
+                    Vec::new(),
+                    vec![],
+                    Some(block(&[], created, &[])),
+                )
+                .unwrap();
+        }
+
+        let view = blocks.program_notes_at(Some(header_id(tip)));
+        assert_eq!(commitments(&view.finalized), [commitment(1)]);
+        assert_eq!(
+            view.unfinalized.len(),
+            2,
+            "the young note is listed with the deep one"
+        );
+        assert_eq!(
+            view.spendable,
+            [commitment(1), commitment(2)].into(),
+            "the note created at the tip is not yet spendable"
         );
     }
 
