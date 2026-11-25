@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
 use lb_common_http_client::Slot;
 use lb_core::{
@@ -675,15 +675,22 @@ pub struct ProgramNote {
     pub path: MerklePath,
 }
 
-/// The channel's program notes at a tip: what a new program step may
-/// consume. `finalized` holds the notes also in the finalized set, immune to
-/// reorgs; `unfinalized` the ones created above LIB on the tip's branch. The
-/// paths are against `root`, the channel's commitment MMR root at the tip.
+/// The channel's program notes at a tip.
+///
+/// `finalized` holds the notes also in the finalized set, immune to reorgs;
+/// `unfinalized` the ones created above LIB on the tip's branch. The paths
+/// are against `root`, the channel's commitment MMR root at the tip.
+///
+/// `spendable` names the notes a step prepared at this tip may consume: the
+/// ones [`SPEND_ROOT_DEPTH`](lb_wallet::SPEND_ROOT_DEPTH) blocks deep, the
+/// depth every wallet spend names its root at. A younger note is listed but
+/// refused until then.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProgramNotesView {
     pub root: Fr,
     pub finalized: Vec<ProgramNote>,
     pub unfinalized: Vec<ProgramNote>,
+    pub spendable: HashSet<NoteCommitment>,
 }
 
 /// The finalized program note set, as a checkpoint carries it: the channel's
