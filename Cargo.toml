@@ -10,7 +10,7 @@ keywords    = ["blockchain", "privacy"]
 license     = "MIT or Apache-2.0"
 readme      = "README.md"
 repository  = "https://github.com/logos-blockchain/logos-zone-sdk"
-version     = "0.3.6"
+version     = "0.1.0"
 
 [workspace.dependencies]
 async-trait                      = { default-features = false, version = "0.1" }
@@ -21,17 +21,17 @@ cucumber                         = { default-features = false, version = "=0.23.
 flate2                           = { default-features = false, version = "1.1.9" }
 futures                          = { default-features = false, version = "0.3.32" }
 hex                              = { default-features = false, version = "0.4" }
-lb-binary-codec                  = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-binary-codec", tag = "0.3.6" }
-lb-common-http-client            = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-common-http-client", tag = "0.3.6" }
-lb-core                          = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-core", tag = "0.3.6" }
-lb-groth16                       = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-groth16", tag = "0.3.6" }
-lb-http-api-common               = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-http-api-common", tag = "0.3.6" }
-lb-key-management-system-service = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-key-management-system-service", tag = "0.3.6" }
-lb-log-targets                   = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-log-targets", tag = "0.3.6" }
-lb-testing-framework             = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "testing-framework", tag = "0.3.6" }
-lb-utils                         = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-utils", tag = "0.3.6" }
+lb-binary-codec                  = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-binary-codec", tag = "0.3.7" }
+lb-common-http-client            = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-common-http-client", tag = "0.3.7" }
+lb-core                          = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-core", tag = "0.3.7" }
+lb-groth16                       = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-groth16", tag = "0.3.7" }
+lb-http-api-common               = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-http-api-common", tag = "0.3.7" }
+lb-key-management-system-service = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-key-management-system-service", tag = "0.3.7" }
+lb-log-targets                   = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-log-targets", tag = "0.3.7" }
+lb-testing-framework             = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "testing-framework", tag = "0.3.7" }
+lb-utils                         = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", package = "logos-blockchain-utils", tag = "0.3.7" }
 lb-zone-sdk                      = { default-features = false, package = "logos-blockchain-zone-sdk", path = "zone-sdk" }
-logos-blockchain-tests           = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", tag = "0.3.6" }
+logos-blockchain-tests           = { default-features = false, git = "https://github.com/logos-blockchain/logos-blockchain.git", tag = "0.3.7" }
 logos-sql                        = { default-features = false, path = "logos_sql" }
 num-bigint                       = { default-features = false, version = "0.4" }
 rand                             = { default-features = false, version = "0.8" }
