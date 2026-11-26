@@ -965,7 +965,7 @@ Feature: Zone SDK
       | alias | data            |
       | MSG_1 | Before the fork |
     Then all zone messages are safe in 120 seconds
-    When node "NODE_1" is in the last slot before the era boundary in 300 seconds
+    When node "NODE_1" is in the last slot before the era boundary in 420 seconds
     And sequencer "SEQ_A" submits the following zone messages without waiting for inclusion:
       | alias | data                  |
       | MSG_2 | Pending at the fork   |

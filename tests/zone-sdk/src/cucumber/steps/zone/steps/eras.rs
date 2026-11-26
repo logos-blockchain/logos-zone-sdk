@@ -59,7 +59,8 @@ async fn wait_for_slots_before_the_boundary(
             .await
             .map_err(|_| StepError::Timeout {
                 message: format!(
-                    "Step `{}`: node '{node_name}' time query exceeded {timeout_seconds}s",
+                    "Step `{}`: node '{node_name}' did not come within {slots} slots of the era \
+                     boundary within {timeout_seconds}s",
                     step.value
                 ),
             })?
