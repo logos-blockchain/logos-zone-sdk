@@ -945,3 +945,51 @@ Feature: Zone SDK
       | MSG_1 |
       | MSG_2 |
     Then the channel view contract holds for all zone sequencers
+
+  @zone_ci
+  Scenario: Zone publishing continues across an era boundary
+    Given the genesis block has the following wallet resources:
+      | account_index | token_count | token_amount |
+      | 1             | 3           | 100000       |
+    And the cluster uses parameter set "cucumber_fixture"
+    And the cluster uses era schedule from era 0 to era 1 starting at epoch 2
+    And I have a cluster with capacity of 1 nodes
+    And I start nodes with wallet and sequencer resources:
+      | node_name | account_index | wallet_name | connected_to | sequencers |
+      | NODE_1    | 1             | WALLET_1A   |              | SEQ_A      |
+    When node "NODE_1" is at height 1 in 120 seconds
+    And wallet "WALLET_1A" sends 30 notes of 1000 LGO to node "NODE_1" funding wallet as "FUNDING_TOPUP"
+    And transaction "FUNDING_TOPUP" is included on node "NODE_1" in 180 seconds
+    And I start zone sequencer "SEQ_A" with indexer
+    And sequencer "SEQ_A" publishes the following zone messages:
+      | alias | data            |
+      | MSG_1 | Before the fork |
+    Then all zone messages are safe in 120 seconds
+    When node "NODE_1" is in the last slot before the era boundary in 300 seconds
+    And sequencer "SEQ_A" submits the following zone messages without waiting for inclusion:
+      | alias | data                  |
+      | MSG_2 | Pending at the fork   |
+      | MSG_3 | Pending at the fork 2 |
+      | MSG_4 | Pending at the fork 3 |
+    And all nodes enter the target era within 120 seconds
+    Then all nodes report the target-era fork digest within 30 seconds
+    When sequencer "SEQ_A" publishes the following zone messages:
+      | alias | data           |
+      | MSG_5 | After the fork |
+    # The messages funded in the old era are refused by the new one; the
+    # sequencer re-funds them under the new era once stale: same message
+    # ids, new transactions.
+    Then zone message "MSG_4" from sequencer "SEQ_A" is included on node "NODE_1" in 120 seconds
+    And zone message "MSG_5" from sequencer "SEQ_A" is included on node "NODE_1" in 120 seconds
+    And all nodes have at least 3 canonical target-era blocks and at least 1 canonical source-era blocks within 180 seconds
+    And the zone indexer returns messages in this order:
+      | alias |
+      | MSG_1 |
+      | MSG_2 |
+      | MSG_3 |
+      | MSG_4 |
+      | MSG_5 |
+    And zone message "MSG_2" finalized under a different tx hash than submitted
+    And zone message "MSG_3" finalized under a different tx hash than submitted
+    And zone message "MSG_4" finalized under a different tx hash than submitted
+    Then the channel view contract holds for all zone sequencers

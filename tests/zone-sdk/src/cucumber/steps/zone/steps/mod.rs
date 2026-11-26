@@ -121,6 +121,7 @@ const CONCURRENT_DUPLICATE_SETTLE_SECS: u64 = 30;
 
 mod assertions;
 mod channel;
+mod eras;
 mod lifecycle;
 mod policies;
 mod publishing;

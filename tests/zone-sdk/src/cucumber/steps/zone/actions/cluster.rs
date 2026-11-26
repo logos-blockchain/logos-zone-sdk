@@ -1,7 +1,7 @@
 use super::{
-    Duration, HashMap, NodesToStartUnordered, NonZero, Step, StepResult, TARGET, WalletStartInfo,
-    ZONE_SECURITY_PARAM, ZoneNodeResourcesRow, ZoneWorld, keygen, set_deployment_config_override,
-    start_node, start_nodes_order_respecting_dependencies, warn,
+    Duration, HashMap, NodesToStartUnordered, NonZero, Step, StepError, StepResult, TARGET,
+    WalletStartInfo, ZONE_SECURITY_PARAM, ZoneNodeResourcesRow, ZoneWorld, keygen,
+    set_deployment_config_override, start_node, start_nodes_order_respecting_dependencies, warn,
 };
 
 pub(in super::super) fn register_zone_sequencers_with_shared_key(
@@ -52,11 +52,26 @@ pub(in super::super) async fn start_nodes_with_zone_resources(
 }
 
 fn apply_zone_timing_defaults(world: &mut ZoneWorld, step: &str) -> StepResult {
+    world.node.set_prolonged_bootstrap_period(Duration::ZERO);
+
+    // A multi-era deployment is validated across its eras when it is built,
+    // before any node override applies, so its consensus parameters come
+    // from a parameter set the node harness keeps consistent.
+    if world.node.startup.era_boundary_schedule.is_some() {
+        if world.node.cluster.cucumber_parameter_set.is_none() {
+            return Err(StepError::LogicalError {
+                message: format!(
+                    "Step `{step}`: an era schedule needs a cluster parameter set; add `the \
+                     cluster uses parameter set \"cucumber_fixture\"` before it"
+                ),
+            });
+        }
+        return Ok(());
+    }
+
     world.node.set_cryptarchia_security_param(
         NonZero::new(ZONE_SECURITY_PARAM).expect("zone security parameter is non-zero"),
     );
-    world.node.set_prolonged_bootstrap_period(Duration::ZERO);
-
     set_deployment_config_override(
         &mut world.node,
         step,
